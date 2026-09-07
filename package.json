@@ -1,0 +1,10 @@
+{
+  "name": "kk-rpa-dashboard",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @rpa/web dev",
+    "build": "pnpm --filter @rpa/web build",
+    "test": "pnpm --filter @rpa/web test"
+  },
+  "packageManager": "pnpm@10.15.1"
+}
