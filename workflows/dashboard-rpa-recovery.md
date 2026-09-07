@@ -2,6 +2,8 @@
 
 状态：已确认，2026-09-07。用户已整体确认本规格作为后续实现基线。当前交付为工作流规格，代码实现与真实验收尚未开展。
 
+后续确认：实际服务端为 Linux，Mac 仅用于开发测试。Windows 只配置控制台连接地址和机器人凭据；业务账号、密码及预期登录身份由控制台创建运行时填写，服务端加密保存并随运行下发，执行端仅在工作进程内使用。当前实现与验收进度见 [实施说明](../docs/recovery-implementation.md)。
+
 目标：已有 RPA 应用失败后，服务器上的 pi Agent 自动接管 Windows 浏览器，在预算内处理现场，通过原 verify 交回程序续跑，并在 dashboard 原运行详情中呈现真实过程与结果。
 
 ## 已确认
@@ -177,7 +179,7 @@ flowchart LR
 | 账号别名、业务 inputs、download_dir | 原运行最终保存的参数；不重算日期，不读取任务后来编辑的新值 |
 | 已完成步骤及输出、失败步骤、诊断和证据 | 原 result.json、events.jsonl 及截图；原记录不改写 |
 | 步骤契约和正式元素 | 当前应用版本的 requirement.md、elements.toml；无需新增契约文件 |
-| 业务凭据 | 原账号对应的运行凭据，经执行端注入服务；不进入模型对话或普通业务参数 |
+| 业务凭据 | 控制台创建运行时提交、服务端加密保存的原账号凭据，随运行下发并经执行端注入服务；不进入模型对话、普通业务参数或 Windows 本地配置 |
 
 **前置条件**：应用及其独立环境已部署到该 Windows 机器人；该机器人仍归此 Run 占用；没有停止请求；接管预算尚有余额；服务器 Agent 和模型服务可用。缺少源参数、应用版本不可用、记录身份不符等情况应给出具体原因，不能补猜业务参数或通过安装、改写程序补救。
 
@@ -267,9 +269,9 @@ flowchart LR
 | kk-rpa-dashboard 的现有 Web 前端 | 将运行详情中的演示数据接成真实事件与证据 |
 | kk-rpa-monorepo 的 Windows 执行端及必要核心扩展 | 执行机器人连接、应用环境内接管、观察和原运行接口；保持应用独立依赖环境 |
 
-服务器通过 Docker Compose 部署 dashboard、Agent 服务及其数据库和持久存储。Agent 服务仅在内部网络接受后端调度；浏览器与 RPA 应用在 Windows 用户会话中运行，不搬入 macOS 容器。
+Linux 实际服务端通过 Docker Compose 部署 dashboard、Agent 服务及持久存储，连接独立应用数据库；Mac 仅用于测试。Agent 服务仅在内部网络接受后端调度；浏览器与 RPA 应用在 Windows 用户会话中运行。
 
-部署入口提供 HTTPS/WSS。机器人连接 Mac 主机的局域网地址和已发布端口，不能使用容器内部 IP，也不能把只绑定 127.0.0.1 的端口当作局域网入口。部署配置需提供局域网可达地址、端口与 Windows 信任的证书；不通过关闭证书校验解决连接问题。[Docker Desktop 网络](https://docs.docker.com/desktop/features/networking/)、[端口发布](https://docs.docker.com/engine/network/port-publishing/)
+部署入口提供 HTTPS/WSS。Mac 测试使用 ngrok 转发本机 Web 端口，Linux 使用正式域名和 HTTPS 反向代理；Windows 连接对应公网地址，不直接连接容器 IP 或服务器回环地址。保持证书校验。[端口发布](https://docs.docker.com/engine/network/port-publishing/)
 
 PostgreSQL 数据、pi 会话与服务端证据分别使用持久存储；重建容器挂载原存储。保留规则沿用控制台默认 30 天及管理员配置，活跃 Run 不清理；会话作为同一 Run 的诊断资料纳入相同生命周期。业务下载文件继续保存在 Windows 原下载目录，不上传为控制台业务文件。[Docker 持久化](https://docs.docker.com/get-started/docker-concepts/running-containers/persisting-container-data/)
 
@@ -290,7 +292,7 @@ PostgreSQL 数据、pi 会话与服务端证据分别使用持久存储；重建
 
 关闭 SDK 内置工具和无关资源自动发现，只加载服务端明确提供的 RPA 工具、系统说明与当前应用契约。程序开发权限不能通过修改提示词、模型输出或运行参数开启。开发实现时选择并锁定满足接口要求的 pi 依赖版本；不把未验证的兼容声明当成接入验收。
 
-**环境配置输入**：部署者配置 DeepSeek 密钥、控制台既定登录与数据库配置、HTTPS 入口、机器人长期凭据和已部署应用位置。实际账号、密钥、主机地址和本机路径保存在私有部署配置，规格和可提交示例使用占位符。这些是部署输入，不是由 Agent 自行推断的业务参数。
+**环境配置输入**：部署者配置 DeepSeek 密钥、控制台既定登录与数据库配置、HTTPS 入口、机器人长期凭据和已部署应用位置。部署密钥、主机地址和本机路径保存在私有部署配置；业务账号密码在控制台填写并由服务端加密保存，规格和可提交示例使用占位符。这些是部署输入，不是由 Agent 自行推断的业务参数。
 
 ### 7. Dashboard 的结果说明
 

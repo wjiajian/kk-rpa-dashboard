@@ -68,18 +68,21 @@ function NewRun({ open, close }: { open: boolean; close: () => void }) {
       const inputs = JSON.parse(values.inputs);
       if (!inputs || Array.isArray(inputs) || typeof inputs !== "object") throw new Error("业务参数必须是 JSON 对象");
       setBusy(true);
-      const run = await api<{ id: string }>("/runs", { name: values.name, robot_id: values.robot_id,
+      const run = await api<{ id: string }>("/runs", { name: values.name, robot_id: values.robot_id, credentials: values.credentials,
         snapshot: { ...release, account_id: values.account_id, inputs, download_dir: values.download_dir || null } });
-      close(); navigate(`/runs/${run.id}`);
+      form.resetFields(); close(); navigate(`/runs/${run.id}`);
     } catch (error) { if (error instanceof Error) void message.error(error.message); }
     finally { setBusy(false); }
   }}>
-    <Form form={form} layout="vertical" initialValues={{ inputs: "{}" }}>
+    <Form form={form} layout="vertical" clearOnDestroy initialValues={{ inputs: "{}" }}>
       <Form.Item name="name" label="运行名称" rules={[{ required: true }]}><Input /></Form.Item>
       <Form.Item name="robot_id" label="机器人" rules={[{ required: true }]}><Select options={robots?.filter(r => !r.revoked).map(r => ({ value: r.id, label: `${r.name} · ${r.online ? "在线" : "离线"}` }))} onChange={() => form.setFieldValue("release", undefined)} /></Form.Item>
       <Form.Item name="release" label="已部署应用 / 版本" rules={[{ required: true }]}><Select options={robot?.deployments.map(d => ({ value: `${d.app_id}@${d.version}`, label: `${d.app_id} · ${d.version}` }))} /></Form.Item>
       <Form.Item name="account_id" label="账号别名" rules={[{ required: true }]}><Input /></Form.Item>
-      <Form.Item name="inputs" label="实际业务参数（JSON）" extra="使用应用要求的字段和实际日期；凭据由机器人账号配置注入。" rules={[{ required: true }]}><Input.TextArea rows={5} /></Form.Item>
+      <Form.Item name={["credentials", "username"]} label="业务登录账号" rules={[{ required: true }]}><Input autoComplete="off" /></Form.Item>
+      <Form.Item name={["credentials", "password"]} label="业务登录密码" rules={[{ required: true }]}><Input.Password autoComplete="new-password" /></Form.Item>
+      <Form.Item name={["credentials", "expected_identity"]} label="登录后预期可见身份" extra="用于核对登录后的店铺或账号身份。账号密码随本次运行保存，从头重跑沿用。" rules={[{ required: true }]}><Input autoComplete="off" /></Form.Item>
+      <Form.Item name="inputs" label="实际业务参数（JSON）" extra="填写应用要求的字段和实际日期。" rules={[{ required: true }]}><Input.TextArea rows={5} /></Form.Item>
       <Form.Item name="download_dir" label="下载目录（可选）"><Input /></Form.Item>
     </Form>
   </Modal>;

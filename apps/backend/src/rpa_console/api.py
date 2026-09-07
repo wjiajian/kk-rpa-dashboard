@@ -13,12 +13,14 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from sqlalchemy import delete, select
 
 from .control import Conflict, Control, TERMINAL, remaining
-from .storage import Database, Event, Evidence, LoginSession, Operation, Robot, Run, uid
+from .credentials import CredentialError, CredentialStore
+from .storage import Database, Event, Evidence, LoginSession, Operation, Robot, Run, RunCredential, uid
 
 
 @dataclass
@@ -32,6 +34,7 @@ class Config:
     tenant_key: str = ""
     admins: tuple = ()
     retention_days: int = 30
+    credential_encryption_key: str = ""
 
     @classmethod
     def env(cls):
@@ -39,7 +42,7 @@ class Config:
                    os.environ["PUBLIC_URL"].rstrip("/"), os.getenv("EVIDENCE_DIR", "/data/evidence"),
                    os.environ["FEISHU_APP_ID"], os.environ["FEISHU_APP_SECRET"],
                    os.environ["FEISHU_TENANT_KEY"], tuple(os.environ["ADMIN_OPEN_IDS"].split(",")),
-                   int(os.getenv("RETENTION_DAYS", "30")))
+                   int(os.getenv("RETENTION_DAYS", "30")), os.environ["CREDENTIAL_ENCRYPTION_KEY"])
 
 
 class StrictModel(BaseModel):
@@ -54,10 +57,20 @@ class Snapshot(StrictModel):
     download_dir: str | None = None
 
 
+class BusinessCredentials(StrictModel):
+    username: SecretStr = Field(min_length=1, max_length=1024)
+    password: SecretStr = Field(min_length=1, max_length=4096)
+    expected_identity: SecretStr = Field(min_length=1, max_length=1024)
+
+    def plaintext(self):
+        return {field: getattr(self, field).get_secret_value() for field in type(self).model_fields}
+
+
 class NewRun(StrictModel):
     robot_id: str
     name: str = Field(min_length=1, max_length=200)
     snapshot: Snapshot
+    credentials: BusinessCredentials
 
 
 class NewRobot(StrictModel):
@@ -75,7 +88,8 @@ class ToolRequest(StrictModel):
 def create_app(config=None, database=None):
     cfg = config or Config.env()
     db = database or Database(cfg.database_url)
-    control = Control(db)
+    credentials = CredentialStore(cfg.credential_encryption_key)
+    control = Control(db, credentials=credentials)
     sockets, connected = {}, set()
     agent_seen = [time()]
     evidence_root = Path(cfg.evidence_dir)
@@ -93,6 +107,11 @@ def create_app(config=None, database=None):
                 try:
                     for command in control.commands(robot_id):
                         await socket.send_json(command)
+                except CredentialError:
+                    with db.transaction() as s:
+                        active_run = s.get(Robot, robot_id).active_run
+                    if active_run:
+                        control.request_stop(active_run, "credentials_unavailable")
                 except (RuntimeError, OSError, WebSocketDisconnect):
                     connected.discard(robot_id)
                     control.disconnect(robot_id)
@@ -112,6 +131,16 @@ def create_app(config=None, database=None):
     @app.exception_handler(Conflict)
     async def conflict(request, error):
         return JSONResponse(status_code=409, content={"detail": str(error)})
+
+    @app.exception_handler(CredentialError)
+    async def credential_error(request, error):
+        return JSONResponse(status_code=409, content={"detail": str(error)})
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        # Pydantic errors can contain the submitted object, including passwords.
+        return JSONResponse(status_code=422, content={"detail": [
+            {key: item[key] for key in ("loc", "msg", "type")} for item in error.errors()]})
 
     def identity(request: Request):
         cookie = request.cookies.get("rpa_session", "")
@@ -207,13 +236,14 @@ def create_app(config=None, database=None):
             if isinstance(value, dict):
                 for key, item in value.items():
                     if any(part in key.lower() for part in ("password", "secret", "token", "credential")):
-                        raise HTTPException(422, "凭据必须在机器人账号配置中提供，不能进入业务参数")
+                        raise HTTPException(422, "账号密码请填写专用凭据字段，不能进入业务参数")
                     reject_secrets(item)
             elif isinstance(value, list):
                 for item in value:
                     reject_secrets(item)
         reject_secrets(body.snapshot.inputs)
-        return {"id": control.create_run(body.robot_id, body.snapshot.model_dump(), body.name)}
+        return {"id": control.create_run(body.robot_id, body.snapshot.model_dump(), body.name,
+                                         credentials=body.credentials.plaintext())}
 
     @app.post("/api/runs/{run_id}/rerun", dependencies=[Depends(admin)])
     def rerun(run_id: str):
@@ -221,7 +251,8 @@ def create_app(config=None, database=None):
             run = s.get(Run, run_id)
             if not run or run.data["status"] not in TERMINAL:
                 raise HTTPException(409, "只能重跑已结束的运行")
-            return {"id": control.create_run(run.robot_id, run.data["snapshot"], run.data["name"], run.id)}
+            return {"id": control.create_run(run.robot_id, run.data["snapshot"], run.data["name"], run.id,
+                                             credentials=credentials.read(s, run.id))}
 
     @app.post("/api/runs/{run_id}/stop", dependencies=[Depends(admin)])
     def stop(run_id: str):
@@ -374,7 +405,7 @@ def create_app(config=None, database=None):
                 raise Conflict("运行未达到清理期限")
             for evidence in s.scalars(select(Evidence).where(Evidence.run_id == run_id)):
                 (evidence_root / evidence.id).unlink(missing_ok=True)
-            for table in (Evidence, Event, Operation):
+            for table in (Evidence, Event, Operation, RunCredential):
                 s.execute(delete(table).where(table.run_id == run_id))
             s.delete(run)
             s.execute(delete(LoginSession).where(LoginSession.expires < time()))

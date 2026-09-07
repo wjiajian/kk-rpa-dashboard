@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare a private config, then start the console against an existing PostgreSQL."""
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -94,6 +95,7 @@ def prepare(path=ENV_FILE, container="postgresql", url=None):
     values.update(POSTGRES_CONTAINER=container, POSTGRES_ADMIN=admin, POSTGRES_NETWORK=network)
     values.setdefault("WEB_PORT", "8088")
     values.setdefault("AGENT_INTERNAL_TOKEN", secrets.token_hex(32))
+    values.setdefault("CREDENTIAL_ENCRYPTION_KEY", base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
     values.setdefault("DATABASE_URL", f"postgresql+psycopg://{DATABASE}:{secrets.token_hex(32)}@{container}:5432/{DATABASE}")
     values.setdefault("DEEPSEEK_MODEL", "deepseek-v4-flash-vision-exp")
     values.setdefault("RETENTION_DAYS", "30")
@@ -111,7 +113,7 @@ def prepare(path=ENV_FILE, container="postgresql", url=None):
     write_env(path, values)
     print(f"私有配置：{path}")
     print(f"测试地址：{values['PUBLIC_URL']}")
-    print(f"飞书回调：{values['PUBLIC_URL']}/api/auth/feishu/callback")
+    print(f"飞书 OAuth 重定向 URL（开发配置 → 安全设置）：{values['PUBLIC_URL']}/api/auth/feishu/callback")
     return values
 
 
@@ -177,7 +179,14 @@ def main():
         return
     values = prepare(container=args.postgres_container, url=args.url)
     if args.action == "prepare":
-        print("填写上方配置的五项后运行：python3 deploy/mac.py up")
+        try:
+            validate(values)
+        except ValueError as error:
+            print(str(error))
+            print("补齐配置后运行：python3 deploy/mac.py up")
+        else:
+            print("配置已填写完整（尚未验证外部凭据有效性）。")
+            print("启动服务：python3 deploy/mac.py up")
         return
     validate(values)
     compose("config", "--quiet")

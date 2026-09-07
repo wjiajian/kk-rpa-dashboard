@@ -1,6 +1,6 @@
 # KK RPA 控制台
 
-RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行控制后端、独立 pi Agent 服务和 macOS Docker 部署配置。Windows 执行端与核心接入扩展位于同级 `kk-rpa-monorepo`。
+RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行控制后端、独立 pi Agent 服务和 Docker Compose 部署配置。实际服务端为 Linux，Mac 仅作为开发测试服务端。Windows 执行端与核心接入扩展位于同级 `kk-rpa-monorepo`。
 
 失败接管的实现、配置与验收状态见 [接管实施说明](docs/recovery-implementation.md)，原规格见 [Dashboard RPA 失败接管](workflows/dashboard-rpa-recovery.md)。代码与离线接口已验证；Windows 真实业务、飞书登录与 DeepSeek 官方模型的现场验收尚未进行。
 
@@ -8,7 +8,9 @@ RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行
 
 测试部署复用 Mac 已运行的 PostgreSQL，使用 ngrok 提供 HTTPS/WSS。保持一个终端运行 `ngrok http 8088 --inspect=false`，另一个终端运行 `python3 deploy/mac.py prepare`。只填写生成的 `deploy/.env` 顶部五项飞书/DeepSeek 配置，登记脚本打印的飞书回调，再运行 `python3 deploy/mac.py up`。
 
-Windows 拉取同级 monorepo 的最新代码，在仓库根目录运行 `.\packages\rpa-executor\start.ps1`；首次输入连接地址和账号凭据后，后续复用本机加密配置。完整步骤见 [简化测试部署](docs/recovery-implementation.md#简化测试部署现有-postgresql--ngrok)。
+Windows 拉取同级 monorepo 的最新代码，在仓库根目录运行 `.\packages\rpa-executor\start.ps1`；首次只输入连接地址和机器人连接凭据；业务账号、密码及预期登录身份在控制台发起运行时填写。完整步骤见 [测试部署文档](docs/test-deployment.md)。
+
+[完整配置示例](deploy/.env.example) 保留所有部署字段。Linux 独立填写自己的 `.env`，准备应用数据库和正式 HTTPS 入口，再使用 Compose 启动；不依赖 Mac、ngrok 或 `mac.py`。具体约定见测试部署文档的 Linux 章节。
 
 镜像启用真实模式，提供运行列表/详情、运行发起与重跑、机器人凭据管理、SSE 事件、证据和停止请求。
 

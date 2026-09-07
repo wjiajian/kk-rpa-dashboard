@@ -32,8 +32,9 @@ def pause_budget(data, at):
 
 
 class Control:
-    def __init__(self, database, clock=time):
+    def __init__(self, database, clock=time, credentials=None):
         self.db, self.clock = database, clock
+        self.credentials = credentials
 
     def add_robot(self, name):
         token = secrets.token_urlsafe(32)
@@ -55,7 +56,7 @@ class Control:
             "attempt_id": data.get("attempt_id"), "details": details or {},
         }))
 
-    def create_run(self, robot_id, snapshot, name, rerun_of=None):
+    def create_run(self, robot_id, snapshot, name, rerun_of=None, credentials=None):
         with self.db.transaction() as s:
             robot = self.db.lock_robot(s, robot_id)
             if not robot.credential_hash:
@@ -71,6 +72,8 @@ class Control:
             })
             s.add(run)
             s.flush()
+            if credentials is not None:
+                self.credentials.save(s, run.id, credentials)
             data = deepcopy(run.data)
             self.event(s, run, data, "queued", "运行已排队")
             run.data = data
@@ -206,11 +209,16 @@ class Control:
                 d = deepcopy(op.data)
                 if d["status"] != "accepted" or d["sent"]:
                     continue
+                # Decrypt only for the authenticated robot transport. Never mutate
+                # the persisted operation body with credentials.
+                body = deepcopy(d["body"])
+                if body["action"] == "start" and self.credentials is not None:
+                    body["params"]["credentials"] = self.credentials.read(s, run.id)
                 # A durable sent bit forbids blind resend after server/socket failure.
                 d["sent"] = True
                 op.data = d
                 messages.append({"type": "command", "console_run_id": run.id,
-                                 "request_id": op.id, **d["body"],
+                                 "request_id": op.id, **body,
                                  **({"next_attempt_id": d["next_attempt_id"]} if d.get("next_attempt_id") else {})})
             return messages
 

@@ -1,23 +1,31 @@
 from hashlib import sha256
 from time import time
+import json
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 import pytest
 
 from rpa_console.api import Config, create_app
-from rpa_console.storage import Base, Database, LoginSession
+from rpa_console.storage import Base, Database, LoginSession, Run, RunCredential, Operation, Event
+from sqlalchemy import select
+
+CREDENTIALS = {"username": "test-business-login", "password": "test-private-password-938!", "expected_identity": "test-visible-identity"}
 
 
 @pytest.fixture
 def app(tmp_path):
     db = Database("sqlite:///" + str(tmp_path / "api.db"))
     Base.metadata.create_all(db.engine)
-    config = Config("unused", "internal-secret", public_url="https://console.test", evidence_dir=str(tmp_path / "evidence"), admins=("admin",))
+    config = Config("unused", "internal-secret", public_url="https://console.test", evidence_dir=str(tmp_path / "evidence"), admins=("admin",),
+                    credential_encryption_key=Fernet.generate_key().decode())
     with db.transaction() as s:
         for token, open_id in (("admin-session", "admin"), ("member-session", "member")):
             s.add(LoginSession(id=sha256(token.encode()).hexdigest(), expires=time() + 600,
                 data={"kind": "user", "name": "test", "open_id": open_id}))
-    return create_app(config, db)
+    application = create_app(config, db)
+    application.state.test_config = config
+    return application
 
 
 def test_permissions_and_csrf_are_server_enforced(app):
@@ -43,9 +51,11 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             assert ws.receive_json()["type"] == "sync"
             ws.send_json({"type": "ready"})
             run_id = client.post("/api/runs", headers=headers, json={"name": "run", "robot_id": robot["id"],
-                "snapshot": {"app_id": "app", "version": "1", "account_id": "original", "inputs": {"date": "2099-01-01"}}}).json()["id"]
+                "snapshot": {"app_id": "app", "version": "1", "account_id": "original", "inputs": {"date": "2099-01-01"}},
+                "credentials": CREDENTIALS}).json()["id"]
             start = ws.receive_json()
             assert start["action"] == "start"
+            assert start["params"]["credentials"] == CREDENTIALS
             seq = 0
             def send(kind, data=None, command=None):
                 nonlocal seq
@@ -67,6 +77,7 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             send("result", command=recovery)
             internal = {"Authorization": "Bearer internal-secret"}
             job = client.post(f"/internal/runs/{run_id}/claim", headers=internal, json={}).json()
+            assert all(value not in json.dumps(job) for value in CREDENTIALS.values())
             response = client.post(f"/internal/runs/{run_id}/operations", headers=internal, json={
                 "lease": job["lease"], "execution_attempt_id": job["execution_attempt_id"], "request_id": "resume-1", "action": "resume",
                 "params": {"from_step": "S2", "step_result": {"observed": True}}})
@@ -78,6 +89,7 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             send("result", command=resume)
             detail = client.get(f"/api/runs/{run_id}").json()
             assert len(detail["attempts"]) == 2
+            assert all(value not in json.dumps(detail) for value in CREDENTIALS.values())
             assert client.get("/api/robots").json()[0]["active_run"] == run_id
             send("ended", command=resumed)
             assert client.get(f"/api/runs/{run_id}").json()["status"] == "succeeded"
@@ -85,3 +97,73 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             client.cookies.set("rpa_session", "member-session")
             business = client.get(f"/api/business/runs/{run_id}").json()
             assert not {"snapshot", "attempts", "robot_id", "lease", "conclusion"} & business.keys()
+            with app.state.database.transaction() as session:
+                for table in (Run, Operation, Event):
+                    rows = [row.data for row in session.scalars(select(table))]
+                    assert all(value not in json.dumps(rows) for value in CREDENTIALS.values())
+                encrypted = session.get(RunCredential, run_id).encrypted
+                assert all(value not in encrypted for value in CREDENTIALS.values())
+
+
+def queued_run(app):
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    client.headers["Origin"] = "https://console.test"
+    robot = app.state.control.add_robot("credential-test")
+    app.state.control.reconcile(robot["id"], {"deployments": [{"app_id": "app", "version": "1"}]})
+    body = {"name": "run", "robot_id": robot["id"], "snapshot": {
+        "app_id": "app", "version": "1", "account_id": "chosen-account", "inputs": {}}, "credentials": CREDENTIALS}
+    return client, robot, body
+
+
+def test_credentials_survive_restart_rerun_and_are_purged_with_run(app):
+    client, robot, body = queued_run(app)
+    response = client.post("/api/runs", json=body)
+    assert response.status_code == 200, response.text
+    first = response.json()["id"]
+    assert client.post(f"/api/runs/{first}/stop", json={}).status_code == 200
+    restarted = create_app(app.state.test_config, Database(str(app.state.database.engine.url)))
+    with TestClient(restarted, base_url="https://console.test") as other:
+        other.cookies.set("rpa_session", "admin-session")
+        response = other.post(f"/api/runs/{first}/rerun", json={}, headers={"Origin": "https://console.test"})
+        assert response.status_code == 200, response.text
+        second = response.json()["id"]
+        with restarted.state.database.transaction() as session:
+            assert restarted.state.control.credentials.read(session, second) == CREDENTIALS
+            assert session.get(RunCredential, first).encrypted != session.get(RunCredential, second).encrypted
+            run = session.get(Run, first)
+            run.data = {**run.data, "ended": time() - 31 * 86400}
+        response = other.post(f"/internal/runs/{first}/purge", json={}, headers={"Authorization": "Bearer internal-secret"})
+        assert response.status_code == 200, response.text
+        with restarted.state.database.transaction() as session:
+            assert session.get(RunCredential, first) is None
+            assert restarted.state.control.credentials.read(session, second) == CREDENTIALS
+
+
+def test_credentials_required_and_validation_never_echoes_submitted_secrets(app):
+    client, robot, body = queued_run(app)
+    missing = {key: value for key, value in body.items() if key != "credentials"}
+    assert client.post("/api/runs", json=missing).status_code == 422
+    invalid = {**body, "credentials": {**CREDENTIALS, "password": {"unexpected": CREDENTIALS["password"]}}}
+    response = client.post("/api/runs", json=invalid)
+    assert response.status_code == 422
+    assert CREDENTIALS["password"] not in response.text
+    assert all("input" not in error for error in response.json()["detail"])
+    client.cookies.set("rpa_session", "member-session")
+    assert client.post("/api/runs", json=body).status_code == 403
+
+
+def test_wrong_encryption_key_does_not_dispatch_or_expose_credentials(app):
+    from rpa_console.credentials import CredentialError, CredentialStore
+    client, robot, body = queued_run(app)
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    control = app.state.control
+    control.tick({robot["id"]})
+    control.credentials = CredentialStore(Fernet.generate_key())
+    with pytest.raises(CredentialError):
+        control.commands(robot["id"])
+    control.request_stop(run_id, "credentials_unavailable")
+    assert client.get("/api/robots").json()[0]["active_run"] is None
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["status"] == "failed"
+    assert all(value not in json.dumps(detail) for value in CREDENTIALS.values())

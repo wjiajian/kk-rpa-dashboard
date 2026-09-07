@@ -35,6 +35,7 @@ class MacSetupTests(unittest.TestCase):
                 second = mac.prepare(path, url="https://changed.example")
             self.assertEqual(first["DATABASE_URL"], second["DATABASE_URL"])
             self.assertEqual(first["AGENT_INTERNAL_TOKEN"], second["AGENT_INTERNAL_TOKEN"])
+            self.assertEqual(first["CREDENTIAL_ENCRYPTION_KEY"], second["CREDENTIAL_ENCRYPTION_KEY"])
             self.assertEqual(second["DEEPSEEK_API_KEY"], values["DEEPSEEK_API_KEY"])
             self.assertEqual(second["ADMIN_OPEN_IDS"], "ou_one,ou_two")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)

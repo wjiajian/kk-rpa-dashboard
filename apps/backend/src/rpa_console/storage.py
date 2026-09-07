@@ -38,6 +38,12 @@ class Operation(Base):
     data: Mapped[dict] = mapped_column(JSON)
 
 
+class RunCredential(Base):
+    __tablename__ = "run_credentials"
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    encrypted: Mapped[str] = mapped_column(String)
+
+
 class Event(Base):
     __tablename__ = "events"
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
