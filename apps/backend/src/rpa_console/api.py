@@ -118,6 +118,20 @@ def create_app(config=None, database=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        # Apply the same per-run retention rule to screenshots saved before this update.
+        obsolete = []
+        with db.transaction() as s:
+            run_ids = list(s.scalars(select(Evidence.run_id).distinct()))
+            for run_id in run_ids:
+                images = list(s.scalars(select(Evidence).where(Evidence.run_id == run_id)))
+                available = [image for image in images if (evidence_root / image.id).is_file()]
+                latest = max(available, key=lambda image: (evidence_root / image.id).stat().st_mtime_ns, default=None)
+                for image in images:
+                    if image is not latest:
+                        s.delete(image)
+                        obsolete.append(evidence_root / image.id)
+        for path in obsolete:
+            path.unlink(missing_ok=True)
         task = asyncio.create_task(scheduler())
         yield
         task.cancel()
@@ -298,7 +312,7 @@ def create_app(config=None, database=None):
     def screenshot(evidence_id: str):
         with db.transaction() as s:
             evidence = s.get(Evidence, evidence_id)
-            if not evidence:
+            if not evidence or not (evidence_root / evidence.id).is_file():
                 raise HTTPException(404, "截图不存在")
             return FileResponse(evidence_root / evidence.id, media_type=evidence.mime,
                                 headers={"Cache-Control": "private, no-store"})
@@ -331,11 +345,11 @@ def create_app(config=None, database=None):
                 await asyncio.sleep(1)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    def save_image(message):
+    def save_image(s, run, message):
         result = message.get("data" if message["type"] == "evidence" else "result", {})
         image = result.pop("image", None)
         if not image:
-            return
+            return []
         data = base64.b64decode(image["data"], validate=True)
         if image["mimeType"] != "image/png" or not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) > 8 * 1024 * 1024:
             raise Conflict("截图格式或大小无效")
@@ -343,10 +357,14 @@ def create_app(config=None, database=None):
         reference = f"event:{message['seq']}" if message["type"] == "evidence" else message["request_id"]
         evidence_id = sha256((message["console_run_id"] + reference).encode()).hexdigest()
         (evidence_root / evidence_id).write_bytes(data)
-        with db.transaction() as s:
-            if not s.get(Evidence, evidence_id):
-                s.add(Evidence(id=evidence_id, run_id=message["console_run_id"], mime="image/png"))
+        obsolete = []
+        for old in s.scalars(select(Evidence).where(Evidence.run_id == run.id, Evidence.id != evidence_id)):
+            obsolete.append(evidence_root / old.id)
+            s.delete(old)
+        if not s.get(Evidence, evidence_id):
+            s.add(Evidence(id=evidence_id, run_id=run.id, mime="image/png"))
         result["evidence_id"] = evidence_id
+        return obsolete
 
     @app.websocket("/api/robots/connect")
     async def robot_connect(socket: WebSocket):
@@ -372,24 +390,13 @@ def create_app(config=None, database=None):
                 if message["type"] == "ready":
                     connected.add(robot_id)
                     continue
-                if message["type"] in {"result", "evidence"}:
-                    with db.transaction() as s:
-                        if message["type"] == "result":
-                            op = s.get(Operation, message["request_id"])
-                            source = s.get(Run, op.run_id) if op else None
-                            if op and message["execution_attempt_id"] != op.data["body"]["execution_attempt_id"]:
-                                raise Conflict("证据与操作尝试不匹配")
-                        else:
-                            source = s.get(Run, message["console_run_id"])
-                            if (source and message["seq"] > source.data["executor_seq"]
-                                    and message["execution_attempt_id"] != source.data["attempt_id"]):
-                                raise Conflict("证据与执行尝试不匹配")
-                        if not source or source.robot_id != robot_id or source.id != message["console_run_id"]:
-                            raise Conflict("证据与请求归属不匹配")
-                        duplicate = message["seq"] <= source.data["executor_seq"]
-                    if not duplicate:
-                        save_image(message)
-                seq = control.accept_message(robot_id, message)
+                obsolete = []
+                def record_image(s, run, event):
+                    obsolete.extend(save_image(s, run, event))
+                seq = control.accept_message(robot_id, message, save_image=record_image)
+                # Delete old files only after the new evidence and event have committed.
+                for path in obsolete:
+                    path.unlink(missing_ok=True)
                 await socket.send_json({"type": "ack", "console_run_id": message["console_run_id"], "seq": seq})
         except (WebSocketDisconnect, ValueError, KeyError, asyncio.TimeoutError):
             with suppress(RuntimeError):
@@ -444,7 +451,11 @@ def create_app(config=None, database=None):
             data = dict(op.data)
             result = dict(data.get("result") or {})
             if result.get("evidence_id"):
-                result["image"] = {"mimeType": "image/png", "data": base64.b64encode((evidence_root / result["evidence_id"]).read_bytes()).decode()}
+                evidence = s.get(Evidence, result["evidence_id"])
+                if evidence and evidence.run_id == run_id and (evidence_root / evidence.id).is_file():
+                    result["image"] = {"mimeType": "image/png", "data": base64.b64encode((evidence_root / evidence.id).read_bytes()).decode()}
+                else:
+                    result["screenshot_missing"] = "该截图已被替换或清理"
             return {"status": data["status"], "result": result}
 
     @app.post("/internal/runs/{run_id}/agent-failed", dependencies=[Depends(internal)])

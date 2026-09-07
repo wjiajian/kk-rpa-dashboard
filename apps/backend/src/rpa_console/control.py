@@ -57,6 +57,25 @@ class Control:
             "attempt_id": data.get("attempt_id"), "details": details or {},
         }))
 
+    def agent_activity(self, s, run, data, operation, status):
+        body = operation["body"]
+        action = body["action"]
+        if action not in TOOLS:
+            return
+        label = {"context": "读取运行上下文", "observe": "观察页面", "credential": "填写登录凭据",
+                 "resume": "提交程序续跑", "give_up": "结束接管"}.get(action)
+        if action == "act":
+            label = {"navigate": "打开业务页面", "click": "点击页面控件", "new_tab": "打开新页签",
+                     "input": "填写页面内容", "select": "选择业务条件", "read": "读取页面状态",
+                     "wait": "等待页面就绪", "download": "下载报表"}.get(body["params"].get("operation"), "操作业务页面")
+        result = operation.get("result") or {}
+        if result.get("observation_error"):
+            status = "failed"
+        state = {"running": "执行中", "succeeded": "已完成", "failed": "失败，等待处理", "unknown": "结果待确认"}[status]
+        if action == "resume" and status == "succeeded":
+            state = "执行端已返回，结果以原程序校验为准"
+        self.event(s, run, data, "agent_activity", f"第 {operation.get('recovery_round', len(data.get('recovery_rounds', [])))} 轮 · {label}：{state}")
+
     def finish_round(self, s, run, data, summary=None):
         rounds = data.get("recovery_rounds", [])
         if not rounds or rounds[-1].get("summary"):
@@ -237,6 +256,7 @@ class Control:
             if not robot.active_run:
                 return []
             run = s.get(Run, robot.active_run)
+            run_data = deepcopy(run.data)
             messages = []
             for op in s.scalars(select(Operation).where(Operation.run_id == run.id)):
                 d = deepcopy(op.data)
@@ -250,9 +270,11 @@ class Control:
                 # A durable sent bit forbids blind resend after server/socket failure.
                 d["sent"] = True
                 op.data = d
+                self.agent_activity(s, run, run_data, d, "running")
                 messages.append({"type": "command", "console_run_id": run.id,
                                  "request_id": op.id, **body,
                                  **({"next_attempt_id": d["next_attempt_id"]} if d.get("next_attempt_id") else {})})
+            run.data = run_data
             return messages
 
     def reconcile(self, robot_id, hello):
@@ -283,7 +305,7 @@ class Control:
                     d["status"] = {"recovery": "recovering", "program": "running"}.get(d["phase"], "uncertain")
             run.data = d
 
-    def accept_message(self, robot_id, message):
+    def accept_message(self, robot_id, message, *, save_image=None):
         with self.db.transaction() as s:
             run, robot, d = self._load(s, message["console_run_id"])
             if robot.id != robot_id:
@@ -303,8 +325,11 @@ class Control:
                 od = deepcopy(op.data)
                 if message["execution_attempt_id"] != od["body"]["execution_attempt_id"]:
                     raise Conflict("操作尝试不匹配")
+                if save_image:
+                    save_image(s, run, message)
                 od.update(status=message["status"], result=message.get("result", {}))
                 op.data = od
+                self.agent_activity(s, run, d, od, od["status"])
                 if od["result"].get("requires_administrator"):
                     d["stop_reason"] = "requires_administrator"
                     d["conclusion"] = {"reason": od["result"]["requires_administrator"],
@@ -378,6 +403,8 @@ class Control:
                     labels = {"step.started": "步骤开始", "step.succeeded": "步骤通过原校验", "step.failed": "步骤失败"}
                     self.event(s, run, d, kind, (payload.get("step_name", "") + "：" if payload.get("step_name") else "") + labels.get(payload.get("event_type"), "程序执行事件"), details=payload)
                 elif kind == "evidence":
+                    if save_image:
+                        save_image(s, run, message)
                     self.event(s, run, d, kind, "现场截图已上传", details=payload)
                 elif kind == "evidence_missing":
                     self.event(s, run, d, kind, "现场截图未取得：" + payload["reason"], details=payload)
@@ -401,6 +428,7 @@ class Control:
                 raise Conflict("已达到 3 轮接管上限")
             self.finish_round(s, run, d)
             rounds.append({"number": len(rounds) + 1, "started": now, "attempt_id": d["attempt_id"]})
+            self.event(s, run, d, "agent_activity", f"第 {len(rounds)} 轮 · Agent 开始分析失败现场")
             d["lease"] = {"id": uid(), "expires": now + 30}
             run.data = d
             return {"console_run_id": run.id, "execution_attempt_id": d["attempt_id"],
@@ -439,6 +467,8 @@ class Control:
                 d["conclusion"] = params
                 d["lease"] = None
             op_id = self.enqueue(s, run, d, action, params, request_id)
+            op = s.get(Operation, op_id)
+            op.data = {**op.data, "recovery_round": len(d.get("recovery_rounds", []))}
             if action in {"resume", "give_up"}:
                 summary = params.get("summary")
                 if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:

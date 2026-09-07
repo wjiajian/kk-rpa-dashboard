@@ -286,3 +286,22 @@ def test_budget_exhaustion_stops_first_round_and_records_its_conclusion(env):
     assert env.state()["stop_reason"] == "budget_exhausted"
     assert len(env.state()["recovery_rounds"]) == 1
     assert "900 秒" in env.state()["recovery_rounds"][0]["summary"]
+
+
+def test_agent_activity_shows_progress_without_dom_or_tool_parameters(env):
+    job = env.recover()
+    observe = env.tool(job, "observe", {"target": "private-locator"}, request="observe")
+    with env.db.transaction() as s:
+        activity = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run)) if e.data["kind"] == "agent_activity"]
+    assert activity[-1]["message"] == "第 1 轮 · 观察页面：执行中"
+    result = env.result(observe, result={"nodes": [{"locator": "private-locator", "text": "large DOM dump"}], "text": "page details"})
+    env.c.accept_message(env.robot, result)
+    click = env.tool(job, "act", {"operation": "click", "target": "private-locator", "value": "private-value"}, request="click")
+    env.result(click, "failed", {"error": "raw exception with page details"})
+    with env.db.transaction() as s:
+        activity = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run)) if e.data["kind"] == "agent_activity"]
+        assert s.get(Operation, observe["request_id"]).data["result"]["text"] == "page details"
+    assert sum(e["message"] == "第 1 轮 · 观察页面：已完成" for e in activity) == 1
+    assert activity[-1]["message"] == "第 1 轮 · 点击页面控件：失败，等待处理"
+    assert all(e["details"] == {} for e in activity)
+    assert all(value not in str(activity) for value in ("private-locator", "private-value", "large DOM dump", "page details"))

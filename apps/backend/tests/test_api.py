@@ -1,10 +1,13 @@
 from hashlib import sha256
 import base64
+import os
+from pathlib import Path
 from time import time
 import json
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 import pytest
 
 from rpa_console.api import Config, create_app
@@ -81,6 +84,11 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             assert len(evidence) == 1
             assert client.get(evidence[0]["url"]).content == png
             send("evidence", {"step_id": "S2", "name": "failure.png", "image": image})
+            failure_evidence = client.get(f"/api/runs/{run_id}").json()["evidence"]
+            assert len(failure_evidence) == 1
+            assert failure_evidence[0]["id"] != evidence[0]["id"]
+            assert client.get(evidence[0]["url"]).status_code == 404
+            assert not (Path(app.state.test_config.evidence_dir) / evidence[0]["id"]).exists()
             send("attempt_finished", {"local_run_id": "original-local", "status": "failed", "recoverable": True})
             send("result", command=start)
             recovery = ws.receive_json()
@@ -98,7 +106,8 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             send("result", {"image": image, "nodes": []}, observe)
             result = client.get(f"/internal/runs/{run_id}/operations/observe-1", headers=internal).json()
             assert result["result"]["image"] == image
-            assert len(client.get(f"/api/runs/{run_id}").json()["evidence"]) == 3
+            assert len(client.get(f"/api/runs/{run_id}").json()["evidence"]) == 1
+            assert client.get(failure_evidence[0]["url"]).status_code == 404
             response = client.post(f"/internal/runs/{run_id}/operations", headers=internal, json={
                 "lease": job["lease"], "execution_attempt_id": job["execution_attempt_id"], "request_id": "resume-1", "action": "resume",
                 "params": {"from_step": "S2", "step_result": {"observed": True}, "summary": "已核对现场，提交 S2 续跑并等待原程序校验。"}})
@@ -106,6 +115,14 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             resume = ws.receive_json()
             resumed = {**resume, "execution_attempt_id": resume["next_attempt_id"]}
             send("program_started", {"local_run_id": "resumed-local"}, resumed)
+            send("evidence", {"step_id": "S2", "name": "S2.png", "image": image}, resumed)
+            latest = client.get(f"/api/runs/{run_id}").json()["evidence"]
+            stale_result = client.get(f"/internal/runs/{run_id}/operations/observe-1", headers=internal).json()
+            assert "image" not in stale_result["result"]
+            assert stale_result["result"]["screenshot_missing"] == "该截图已被替换或清理"
+            assert stale_result["result"]["nodes"] == []
+            send("evidence_missing", {"reason": "fixture capture failed"}, resumed)
+            assert client.get(f"/api/runs/{run_id}").json()["evidence"] == latest
             send("attempt_finished", {"local_run_id": "resumed-local", "status": "succeeded"}, resumed)
             send("result", command=resume)
             detail = client.get(f"/api/runs/{run_id}").json()
@@ -122,7 +139,8 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             assert ws.receive_json()["seq"] == seq
             client.cookies.set("rpa_session", "member-session")
             business = client.get(f"/api/business/runs/{run_id}").json()
-            assert len(business["evidence"]) == 3
+            assert business["evidence"] == latest
+            assert len(business["evidence"]) == 1
             assert all(client.get(item["url"]).content == png for item in business["evidence"])
             assert not {"snapshot", "attempts", "robot_id", "lease", "conclusion"} & business.keys()
             with app.state.database.transaction() as session:
@@ -131,7 +149,8 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
                     assert all(value not in json.dumps(rows) for value in CREDENTIALS.values())
                 encrypted = session.get(RunCredential, run_id).encrypted
                 assert all(value not in encrypted for value in CREDENTIALS.values())
-                assert len(list(session.scalars(select(Evidence)))) == 3
+                assert len(list(session.scalars(select(Evidence)))) == 1
+            assert [p.name for p in Path(app.state.test_config.evidence_dir).iterdir()] == [latest[0]["id"]]
             assert TestClient(app, base_url="https://console.test").get(evidence[0]["url"]).status_code == 401
 
 
@@ -144,6 +163,52 @@ def queued_run(app):
     body = {"name": "run", "robot_id": robot["id"], "snapshot": {
         "app_id": "app", "version": "1", "inputs": {}}, "credentials": CREDENTIALS}
     return client, robot, body
+
+
+def test_startup_removes_older_screenshots_per_run(app):
+    client, robot, body = queued_run(app)
+    first = client.post("/api/runs", json=body).json()["id"]
+    second = client.post("/api/runs", json={**body, "name": "second"}).json()["id"]
+    root = Path(app.state.test_config.evidence_dir)
+    with app.state.database.transaction() as s:
+        for image_id, run_id, timestamp in (("old", first, 1), ("latest", first, 2), ("other-run", second, 3)):
+            s.add(Evidence(id=image_id, run_id=run_id, mime="image/png"))
+            target = root / image_id
+            target.write_bytes(b"fixture screenshot")
+            os.utime(target, (timestamp, timestamp))
+    with TestClient(app, base_url="https://console.test") as restarted:
+        restarted.cookies.set("rpa_session", "admin-session")
+        assert [e["id"] for e in restarted.get(f"/api/runs/{first}").json()["evidence"]] == ["latest"]
+        assert [e["id"] for e in restarted.get(f"/api/runs/{second}").json()["evidence"]] == ["other-run"]
+        assert {p.name for p in root.iterdir()} == {"latest", "other-run"}
+        assert restarted.get("/api/business/screenshots/old").status_code == 404
+
+
+@pytest.mark.parametrize("invalid", ["format", "attempt", "sequence"])
+def test_rejected_image_does_not_delete_last_accepted_screenshot(app, invalid):
+    client, robot, body = queued_run(app)
+    with client:
+        with client.websocket_connect("/api/robots/connect", headers={"Authorization": "Bearer " + robot["credential"]}) as ws:
+            ws.send_json({"type": "hello", "journal_complete": True, "requests": {}, "deployments": [{"app_id": "app", "version": "1"}]})
+            assert ws.receive_json()["type"] == "sync"
+            ws.send_json({"type": "ready"})
+            run_id = client.post("/api/runs", json=body).json()["id"]
+            start = ws.receive_json()
+            event = {"type": "evidence", "console_run_id": run_id, "execution_attempt_id": start["execution_attempt_id"],
+                "seq": 1, "data": {"image": {"mimeType": "image/png", "data": base64.b64encode(b"\x89PNG\r\n\x1a\nfixture").decode()}}}
+            ws.send_json(event)
+            assert ws.receive_json()["type"] == "ack"
+            original = client.get(f"/api/runs/{run_id}").json()["evidence"]
+            bad = {**event, "seq": 2}
+            if invalid == "format": bad["data"] = {"image": {"mimeType": "image/png", "data": "bm90LXBuZw=="}}
+            if invalid == "attempt": bad["execution_attempt_id"] = "stale-attempt"
+            if invalid == "sequence": bad["seq"] = 3
+            ws.send_json(bad)
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+        assert client.get(f"/api/runs/{run_id}").json()["evidence"] == original
+        assert client.get(original[0]["url"]).status_code == 200
+        assert [p.name for p in Path(app.state.test_config.evidence_dir).iterdir()] == [original[0]["id"]]
 
 
 def test_credentials_survive_restart_rerun_and_are_purged_with_run(app):

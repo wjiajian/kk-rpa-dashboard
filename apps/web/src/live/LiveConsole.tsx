@@ -3,6 +3,7 @@ import { Alert, App, Button, Descriptions, Empty, Form, Image, Input, Modal, Sel
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { PageTitle, Panel, StatusTag } from "../components/shared";
 import { api, date, statuses, terminal, type RobotRecord, type RunEvent, type RunRecord } from "./api";
+import { ExecutionLog } from "./ExecutionLog";
 
 function useResource<T>(path: string, interval = 3000) {
   const [data, setData] = useState<T>();
@@ -126,14 +127,12 @@ function LiveDetail({ business }: { business: boolean }) {
       { key: "inputs", label: "原业务参数", children: <code>{JSON.stringify(run.snapshot?.inputs)}</code> },
     ]} /></Panel>}
     {run.conclusion && <Panel title="接管结论"><div className="panel-padding"><p>{run.conclusion.reason}</p><p>已尝试：{run.conclusion.attempted.join("；") || "无"}</p><p>后续处理：{run.conclusion.next_actions.join("；") || "无"}</p></div></Panel>}
-    <div className="detail-grid"><div><Panel title="执行过程" extra={<Tag>{events.length} 条已记录事件</Tag>}><div className="log-stream">
-      {events.length ? events.map(event => <div className="log-line" key={event.seq}><span className="log-time mono">{date(event.at)}</span><div><strong style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{event.message}</strong>{!business && event.kind !== "agent_summary" && event.details && Object.keys(event.details).length > 0 && <details><summary>查看执行结果</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(event.details, null, 2)}</pre></details>}</div></div>) : <Empty description="尚无执行事件" />}
-    </div></Panel></div><div>
+    <div className="detail-grid"><div><ExecutionLog events={events} business={business} /></div><div>
       {!business && <Panel title="执行尝试"><Table rowKey="id" pagination={false} dataSource={run.attempts} columns={[
         { title: "尝试", render: (_, attempt, index) => <div>第 {index + 1} 次<div className="small mono">{attempt.local_run_id}</div></div> },
         { title: "结果", dataIndex: "status", render: status => <StatusTag status={statuses[status] ?? status} /> },
       ]} /></Panel>}
-      <Panel title="现场证据"><div className="panel-padding">{run.evidence?.length ? <Image.PreviewGroup>{run.evidence.map(e => <Image key={e.id} src={e.url} alt="执行端现场截图" />)}</Image.PreviewGroup> : <Empty description="尚未收到可用截图" />}</div></Panel>
+      <Panel title="现场证据" extra={<Tag>仅保留最新截图</Tag>}><div className="panel-padding">{run.evidence?.[0] ? <Image key={run.evidence[0].id} src={run.evidence[0].url} alt="执行端最新现场截图" /> : <Empty description="尚未收到可用截图" />}</div></Panel>
     </div></div>
   </>;
 }
