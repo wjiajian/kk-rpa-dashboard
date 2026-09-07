@@ -7,9 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-responses";
-import { makeSession } from "./session.js";
+import { makeSession, promptRecovery } from "./session.js";
+import { sessionUsage } from "./usage.js";
 
-test("actual pi SDK streams tools, sends screenshot on next request and restores the run session", async () => {
+test("actual pi SDK streams tools and screenshots, continues after truncation and restores usage", async () => {
   const requests: Record<string, any>[] = [];
   const server = createServer(async (request, response) => {
     let body = "";
@@ -37,7 +38,9 @@ test("actual pi SDK streams tools, sends screenshot on next request and restores
       send("response.output_item.done", { output_index: 0, item });
       output.push(item);
     }
-    send("response.completed", { response: { id: `response-${requests.length}`, status: "completed", output,
+    const truncated = requests.length === 2;
+    send(truncated ? "response.incomplete" : "response.completed", { response: { id: `response-${requests.length}`, status: truncated ? "incomplete" : "completed", output,
+      ...(truncated ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
       usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } });
     response.end();
   });
@@ -51,20 +54,25 @@ test("actual pi SDK streams tools, sends screenshot on next request and restores
     calls.push(action);
     return { status: "succeeded", result: action === "observe" ? { image: { mimeType: "image/png", data: "c2NyZWVuc2hvdA==" }, url: "https://business.test" } : { source: { account_id: "original" } } };
   };
-  const { session } = await makeSession(id, root, "offline-test-key", invoke);
+  const active = await makeSession(id, root, "offline-test-key", invoke);
+  const { session } = active;
   session.agent.streamFunction = (model, context, options) => streamSimple({ ...model, api: "openai-responses", baseUrl: `http://127.0.0.1:${port}` }, context, { ...options, apiKey: "offline-test-key" });
   try {
-    await session.prompt("读取上下文并观察当前页面。");
+    await promptRecovery(active, "读取上下文并观察当前页面。", new AbortController().signal);
     assert.deepEqual(calls, ["context", "observe"]);
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
+    assert.ok(JSON.stringify(requests[2].input).includes("上一条模型响应达到输出上限"));
+    assert.equal(sessionUsage(session.sessionManager).input, 30);
+    assert.equal(sessionUsage(session.sessionManager).output, 30);
     assert.equal(requests[0].store, false);
     assert.equal(requests[1].previous_response_id, undefined);
     assert.ok(requests[1].input.some((item: any) => item.type === "function_call_output" && Array.isArray(item.output) && item.output.some((part: any) => part.type === "input_image")));
     assert.deepEqual(requests[0].tools.map((tool: any) => tool.name).sort(), ["act", "context", "credential", "give_up", "observe", "resume"]);
-    const count = session.messages.length;
+    const persistedMessages = session.sessionManager.getEntries().filter(entry => entry.type === "message").map(entry => entry.id);
     session.dispose();
     const restored = await makeSession(id, root, "offline-test-key", invoke);
-    assert.equal(restored.session.messages.length, count);
+    assert.deepEqual(restored.session.sessionManager.getEntries().filter(entry => entry.type === "message").map(entry => entry.id), persistedMessages);
+    assert.equal(sessionUsage(restored.session.sessionManager).input, 30);
     restored.session.dispose();
   } finally {
     session.dispose();

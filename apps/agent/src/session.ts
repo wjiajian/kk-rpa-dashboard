@@ -12,6 +12,7 @@ export const SYSTEM = `你是 RPA 失败接管运行 Agent，所有说明使用�
 工具动作失败后停止本轮余下动作，下一轮先 observe，根据新证据决定。不得无新证据原样重试同一失败操作。
 遇到验证码、滑块、短信、人为验证、失效凭据或权限问题，调用 give_up：留证、说明原因和管理员需做的事；不等待人工、不绕过验证。
 页面可恢复时准备前置状态，调用 resume 选择原步骤；未完成步骤不能跳过。
+resume 的 summary 只是日志，不会作为指令传给程序。只提交 from_step 会从该步骤开头重新执行，包括刷新等动作；页面暂时就绪不保证重跑后仍就绪。定位器修正必须放入 locator_overrides；已真实完成步骤才提交 step_result，字段须符合原步骤契约。不得把猜测写成已确认结论。
 如完成失败步骤，回读实际结果后按原格式提交 step_result，由原 verify 判定。
 resume 或 give_up 后不再操作浏览器。Agent 文字不能宣告运行成功，只有程序最终事件可确认。
 同一 Run 最多进行 3 轮完整接管，所有轮次合计仍受 900 秒限制；一轮可包含多次模型请求和工具调用。
@@ -49,4 +50,18 @@ export async function makeSession(runId: string, root: string, apiKey: string, i
   await session.setModel(runtime.getModel("rpa-deepseek", modelId)!);
   session.setActiveToolsByName(customTools.map(tool => tool.name));
   return { session, gate };
+}
+
+export async function promptRecovery(active: Awaited<ReturnType<typeof makeSession>>, prompt: string, signal: AbortSignal) {
+  while (!signal.aborted && !active.gate.finished) {
+    await active.session.prompt(prompt);
+    // The SDK can remove a truncated reply from active context; the persisted
+    // history still contains its finish reason.
+    const last = [...active.session.sessionManager.getEntries()].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
+    const truncated = last?.type === "message" && last.message.role === "assistant" && last.message.stopReason === "length";
+    if (active.gate.finished || signal.aborted || !truncated) return;
+    // Output truncation is another model request within the same takeover.
+    // Never reconstruct or execute a partial tool call ourselves.
+    prompt = "上一条模型响应达到输出上限，尚未完成交接。继续本轮接管，沿用已有观察结论，简短说明并直接调用下一项必要工具。不要重复长篇分析、不要重发已执行操作。修正必须通过工具参数提交，不能只写在总结里；无法恢复时调用 give_up。";
+  }
 }

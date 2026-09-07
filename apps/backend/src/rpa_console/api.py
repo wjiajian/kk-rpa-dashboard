@@ -84,6 +84,17 @@ class ToolRequest(StrictModel):
     params: dict
 
 
+class UsageReport(StrictModel):
+    session_id: str = Field(min_length=1, max_length=100)
+    revision: int = Field(ge=0)
+    input: int = Field(ge=0)
+    output: int = Field(ge=0)
+    cache_read: int = Field(ge=0)
+    cache_write: int = Field(ge=0)
+    requests: int = Field(ge=0)
+    unreported_responses: int = Field(ge=0)
+
+
 def create_app(config=None, database=None):
     cfg = config or Config.env()
     db = database or Database(cfg.database_url)
@@ -279,6 +290,7 @@ def create_app(config=None, database=None):
         if not business:
             result.update({**d, "robot_id": run.robot_id, "remaining_seconds": remaining(d, time())})
             result.pop("lease", None)
+            result.pop("token_sessions", None)
         return result
 
     def read_run(run_id, business):
@@ -457,6 +469,23 @@ def create_app(config=None, database=None):
                 else:
                     result["screenshot_missing"] = "该截图已被替换或清理"
             return {"status": data["status"], "result": result}
+
+    @app.post("/internal/runs/{run_id}/usage", dependencies=[Depends(internal)])
+    def usage(run_id: str, body: UsageReport):
+        with db.transaction() as s:
+            if not s.get(Run, run_id):
+                return {"recorded": False}
+            run, _, data = control._load(s, run_id)
+            sessions = data.setdefault("token_sessions", {})
+            previous = sessions.get(body.session_id)
+            if previous is None or body.revision > previous["revision"]:
+                sessions[body.session_id] = body.model_dump(exclude={"session_id"})
+                fields = ("input", "output", "cache_read", "cache_write", "requests", "unreported_responses")
+                totals = {key: sum(item[key] for item in sessions.values()) for key in fields}
+                totals["total"] = sum(totals[key] for key in ("input", "output", "cache_read", "cache_write"))
+                data["token_usage"] = totals
+                run.data = data
+        return {"recorded": True}
 
     @app.post("/internal/runs/{run_id}/agent-failed", dependencies=[Depends(internal)])
     def agent_failed(run_id: str, body: dict):

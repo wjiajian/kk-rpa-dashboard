@@ -21,6 +21,7 @@ export interface RunRecord {
   attempts?: { id: string; local_run_id: string; status: string; result?: Record<string, unknown> }[];
   conclusion?: { reason: string; attempted: string[]; next_actions: string[]; evidence: string[] };
   evidence?: { id: string; url: string }[];
+  token_usage?: { input: number; output: number; cache_read: number; cache_write: number; total: number; requests: number; unreported_responses: number };
 }
 export interface RunEvent { seq: number; kind: string; message: string; at: number; details?: Record<string, unknown> }
 export interface RobotRecord { id: string; name: string; active_run?: string; online: boolean; revoked: boolean; deployments: { app_id: string; version: string }[] }

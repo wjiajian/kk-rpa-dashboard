@@ -2,7 +2,8 @@ import { createServer } from "node:http";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { makeSession } from "./session.js";
+import { makeSession, promptRecovery } from "./session.js";
+import { restoreUsage, sessionUsage } from "./usage.js";
 import type { Reply } from "./tools.js";
 
 const backend = process.env.BACKEND_URL ?? "http://backend:8000";
@@ -31,7 +32,11 @@ async function run(job: Job, abort: AbortController) {
     while (!abort.signal.aborted) {
       await sleep(3000, undefined, { signal: abort.signal });
       const state = await api(`${path}/heartbeat`, { lease: job.lease }, abort.signal);
-      if (!state.active || state.remaining_seconds <= 0) abort.abort();
+      if (!state.active || state.remaining_seconds <= 0) {
+        abort.abort();
+        break;
+      }
+      if (activeSession) await api(`${path}/usage`, sessionUsage(activeSession.session.sessionManager), abort.signal).catch(() => undefined);
     }
   })().catch(() => abort.abort());
   try {
@@ -51,7 +56,7 @@ async function run(job: Job, abort: AbortController) {
     });
     abort.signal.addEventListener("abort", () => { void activeSession?.session.abort(); }, { once: true });
     abort.signal.throwIfAborted();
-    await activeSession.session.prompt(`处理控制台运行 ${job.console_run_id} 的当前失败尝试 ${job.execution_attempt_id}。这是第 ${job.recovery_round}/${job.max_recovery_rounds} 轮完整接管，累计剩余 ${Math.ceil(job.remaining_seconds)} 秒。先读取最新 context 和 observe；历史工具调用不可重发。结束时通过 resume 或 give_up 的 summary 提交本轮最终总结。`);
+    await promptRecovery(activeSession, `处理控制台运行 ${job.console_run_id} 的当前失败尝试 ${job.execution_attempt_id}。这是第 ${job.recovery_round}/${job.max_recovery_rounds} 轮完整接管，累计剩余 ${Math.ceil(job.remaining_seconds)} 秒。先读取最新 context 和 observe；历史工具调用不可重发。结束时通过 resume 或 give_up 的 summary 提交本轮最终总结。`, abort.signal);
     if (!activeSession.gate.finished && !abort.signal.aborted) {
       await api(`${path}/agent-failed`, { lease: job.lease });
     }
@@ -63,6 +68,7 @@ async function run(job: Job, abort: AbortController) {
     clearTimeout(timer);
     await monitor;
     await activeSession?.session.abort();
+    if (activeSession) await api(`${path}/usage`, sessionUsage(activeSession.session.sessionManager)).catch(() => undefined);
     activeSession?.session.dispose();
   }
 }
@@ -79,8 +85,13 @@ for (const event of ["SIGINT", "SIGTERM"] as const) process.on(event, () => {
   server.close();
 });
 
+let usageRestored = false;
 while (!shuttingDown) {
   try {
+    if (!usageRestored) {
+      await restoreUsage(root, (id, usage) => api(`/internal/runs/${id}/usage`, usage));
+      usageRestored = true;
+    }
     const work: { runs: string[]; expired: string[] } = await api("/internal/agent/work");
     for (const id of work.expired) {
       if (jobs.has(id) || !/^[a-f0-9-]{36}$/.test(id)) continue;

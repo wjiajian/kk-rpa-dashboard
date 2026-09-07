@@ -165,6 +165,27 @@ def queued_run(app):
     return client, robot, body
 
 
+def test_usage_reports_are_cumulative_idempotent_and_survive_run_end(app):
+    client, _, body = queued_run(app)
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    url = f"/internal/runs/{run_id}/usage"
+    report = {"session_id": "session-one", "revision": 10, "input": 100, "output": 50,
+              "cache_read": 200, "cache_write": 0, "requests": 3, "unreported_responses": 1}
+    assert client.post(url, json=report).status_code == 401
+    headers = {"Authorization": "Bearer internal-secret"}
+    for payload in (report, report, {**report, "revision": 9, "input": 999}):
+        assert client.post(url, json=payload, headers=headers).status_code == 200
+    result = client.get(f"/api/runs/{run_id}").json()
+    assert result["token_usage"]["total"] == 350
+    assert "token_sessions" not in result
+    with app.state.database.transaction() as s:
+        row = s.get(Run, run_id)
+        row.data = {**row.data, "status": "failed", "phase": "ended"}
+    assert client.post(url, json={**report, "session_id": "session-two"}, headers=headers).status_code == 200
+    assert client.get(f"/api/runs/{run_id}").json()["token_usage"]["total"] == 700
+    assert client.post(url, json={**report, "input": -1}, headers=headers).status_code == 422
+
+
 def test_startup_removes_older_screenshots_per_run(app):
     client, robot, body = queued_run(app)
     first = client.post("/api/runs", json=body).json()["id"]

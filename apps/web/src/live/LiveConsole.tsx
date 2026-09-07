@@ -4,6 +4,7 @@ import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from "
 import { PageTitle, Panel, StatusTag } from "../components/shared";
 import { api, date, statuses, terminal, type RobotRecord, type RunEvent, type RunRecord } from "./api";
 import { ExecutionLog } from "./ExecutionLog";
+import { TokenUsage } from "./TokenUsage";
 
 function useResource<T>(path: string, interval = 3000) {
   const [data, setData] = useState<T>();
@@ -123,7 +124,7 @@ function LiveDetail({ business }: { business: boolean }) {
       { key: "phase", label: "当前阶段", children: ({ queued: "排队", starting: "准备程序", program: "程序执行", failed: "失败现场", opening: "打开恢复上下文", recovery: "Agent 处理现场", submitting: "等待续跑确认", finishing: "确认收尾", ended: "已结束" } as Record<string, string>)[run.phase ?? ""] },
       { key: "budget", label: "本次运行接管剩余", children: run.remaining_seconds === undefined ? "—" : `${Math.ceil(run.remaining_seconds)} 秒 / 900 秒` },
       { key: "rounds", label: "接管轮数", children: `${run.recovery_rounds?.length ?? 0} / 3 轮` },
-      { key: "source", label: "来源运行", children: run.rerun_of ? <Link to={`/runs/${run.rerun_of}`}>{run.rerun_of}</Link> : "—" },
+      { key: "tokens", label: "Agent Token 用量", children: <TokenUsage usage={run.token_usage} /> },
       { key: "inputs", label: "原业务参数", children: <code>{JSON.stringify(run.snapshot?.inputs)}</code> },
     ]} /></Panel>}
     {run.conclusion && <Panel title="接管结论"><div className="panel-padding"><p>{run.conclusion.reason}</p><p>已尝试：{run.conclusion.attempted.join("；") || "无"}</p><p>后续处理：{run.conclusion.next_actions.join("；") || "无"}</p></div></Panel>}
