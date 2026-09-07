@@ -36,7 +36,6 @@ export interface Task {
   appId: string;
   version: string;
   robot: string;
-  account: string;
   brand: string;
   filename: string;
   date: Binding;
@@ -51,7 +50,6 @@ export interface Run {
   appId: string;
   version: string;
   robot: string;
-  account: string;
   params: Record<string, string>;
   status: Status;
   source: string;
@@ -146,7 +144,6 @@ export const tasks: Task[] = Array.from({ length: 6 }, (_, i) => ({
   appId: applications[i % 3].id,
   version: applications[i % 3].version,
   robot: robots[i % 3].id,
-  account: `STORE_00${i + 1}`,
   brand: "全部品牌",
   filename: "report.xlsx",
   date: { kind: "relative_date", offset_days: -1 },
@@ -177,7 +174,6 @@ export const runs: Run[] = statuses.map((status, i) => {
     appId: t.appId,
     version: t.version,
     robot: t.robot,
-    account: t.account,
     params: {
       target_date: dayjs().subtract(1, "day").format("YYYY-MM-DD"),
       brand: t.brand,

@@ -1,4 +1,5 @@
 from hashlib import sha256
+import base64
 from time import time
 import json
 
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from rpa_console.api import Config, create_app
-from rpa_console.storage import Base, Database, LoginSession, Run, RunCredential, Operation, Event
+from rpa_console.storage import Base, Database, Evidence, LoginSession, Run, RunCredential, Operation, Event
 from sqlalchemy import select
 
 CREDENTIALS = {"username": "test-business-login", "password": "test-private-password-938!", "expected_identity": "test-visible-identity"}
@@ -51,7 +52,7 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             assert ws.receive_json()["type"] == "sync"
             ws.send_json({"type": "ready"})
             run_id = client.post("/api/runs", headers=headers, json={"name": "run", "robot_id": robot["id"],
-                "snapshot": {"app_id": "app", "version": "1", "account_id": "original", "inputs": {"date": "2099-01-01"}},
+                "snapshot": {"app_id": "app", "version": "1", "inputs": {"date": "2099-01-01"}},
                 "credentials": CREDENTIALS}).json()["id"]
             start = ws.receive_json()
             assert start["action"] == "start"
@@ -62,13 +63,24 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
                 seq += 1
                 message = {"type": kind, "console_run_id": run_id, "execution_attempt_id": (command or start)["execution_attempt_id"],
                            "seq": seq, "data": data or {}}
-                if kind == "result": message.update(request_id=command["request_id"], status="succeeded", result={})
+                if kind == "result": message.update(request_id=command["request_id"], status="succeeded", result=data or {})
                 ws.send_json(message)
                 response = ws.receive_json()
                 assert response["type"] == "ack", response
                 assert response["console_run_id"] == run_id
+                return message
             send("program_started", {"local_run_id": "original-local"})
             send("resolved", {"inputs": {"date": "2099-01-01"}, "download_dir": "C:/Downloads"})
+            png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+            image = {"mimeType": "image/png", "data": base64.b64encode(png).decode()}
+            first_image = send("evidence", {"step_id": "S1", "name": "S1.png", "image": image})
+            ws.send_json(first_image)
+            assert ws.receive_json()["seq"] == first_image["seq"]
+            # Evidence is visible before the program finishes or Agent is invoked.
+            evidence = client.get(f"/api/runs/{run_id}").json()["evidence"]
+            assert len(evidence) == 1
+            assert client.get(evidence[0]["url"]).content == png
+            send("evidence", {"step_id": "S2", "name": "failure.png", "image": image})
             send("attempt_finished", {"local_run_id": "original-local", "status": "failed", "recoverable": True})
             send("result", command=start)
             recovery = ws.receive_json()
@@ -78,9 +90,18 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             internal = {"Authorization": "Bearer internal-secret"}
             job = client.post(f"/internal/runs/{run_id}/claim", headers=internal, json={}).json()
             assert all(value not in json.dumps(job) for value in CREDENTIALS.values())
+            observed = client.post(f"/internal/runs/{run_id}/operations", headers=internal, json={
+                "lease": job["lease"], "execution_attempt_id": job["execution_attempt_id"], "request_id": "observe-1",
+                "action": "observe", "params": {}})
+            assert observed.status_code == 200
+            observe = ws.receive_json()
+            send("result", {"image": image, "nodes": []}, observe)
+            result = client.get(f"/internal/runs/{run_id}/operations/observe-1", headers=internal).json()
+            assert result["result"]["image"] == image
+            assert len(client.get(f"/api/runs/{run_id}").json()["evidence"]) == 3
             response = client.post(f"/internal/runs/{run_id}/operations", headers=internal, json={
                 "lease": job["lease"], "execution_attempt_id": job["execution_attempt_id"], "request_id": "resume-1", "action": "resume",
-                "params": {"from_step": "S2", "step_result": {"observed": True}}})
+                "params": {"from_step": "S2", "step_result": {"observed": True}, "summary": "已核对现场，提交 S2 续跑并等待原程序校验。"}})
             assert response.status_code == 200, response.text
             resume = ws.receive_json()
             resumed = {**resume, "execution_attempt_id": resume["next_attempt_id"]}
@@ -89,13 +110,20 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             send("result", command=resume)
             detail = client.get(f"/api/runs/{run_id}").json()
             assert len(detail["attempts"]) == 2
+            assert "account_id" not in detail["snapshot"]
+            assert detail["recovery_rounds"][0]["summary"] == "已核对现场，提交 S2 续跑并等待原程序校验。"
             assert all(value not in json.dumps(detail) for value in CREDENTIALS.values())
             assert client.get("/api/robots").json()[0]["active_run"] == run_id
             send("ended", command=resumed)
             assert client.get(f"/api/runs/{run_id}").json()["status"] == "succeeded"
             assert client.get("/api/robots").json()[0]["active_run"] is None
+            # A reconnect can still drain an old queued image after resume/end.
+            ws.send_json(first_image)
+            assert ws.receive_json()["seq"] == seq
             client.cookies.set("rpa_session", "member-session")
             business = client.get(f"/api/business/runs/{run_id}").json()
+            assert len(business["evidence"]) == 3
+            assert all(client.get(item["url"]).content == png for item in business["evidence"])
             assert not {"snapshot", "attempts", "robot_id", "lease", "conclusion"} & business.keys()
             with app.state.database.transaction() as session:
                 for table in (Run, Operation, Event):
@@ -103,6 +131,8 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
                     assert all(value not in json.dumps(rows) for value in CREDENTIALS.values())
                 encrypted = session.get(RunCredential, run_id).encrypted
                 assert all(value not in encrypted for value in CREDENTIALS.values())
+                assert len(list(session.scalars(select(Evidence)))) == 3
+            assert TestClient(app, base_url="https://console.test").get(evidence[0]["url"]).status_code == 401
 
 
 def queued_run(app):
@@ -112,7 +142,7 @@ def queued_run(app):
     robot = app.state.control.add_robot("credential-test")
     app.state.control.reconcile(robot["id"], {"deployments": [{"app_id": "app", "version": "1"}]})
     body = {"name": "run", "robot_id": robot["id"], "snapshot": {
-        "app_id": "app", "version": "1", "account_id": "chosen-account", "inputs": {}}, "credentials": CREDENTIALS}
+        "app_id": "app", "version": "1", "inputs": {}}, "credentials": CREDENTIALS}
     return client, robot, body
 
 

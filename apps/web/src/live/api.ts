@@ -16,7 +16,8 @@ export const date = (at?: number) => at ? new Date(at * 1000).toLocaleString("zh
 export interface RunRecord {
   id: string; name: string; status: string; created: number; ended?: number; seq: number;
   phase?: string; robot_id?: string; remaining_seconds?: number; recovery_used?: number; stop_reason?: string;
-  rerun_of?: string; snapshot?: { app_id: string; version: string; account_id: string; inputs: Record<string, unknown>; download_dir?: string };
+  rerun_of?: string; snapshot?: { app_id: string; version: string; inputs: Record<string, unknown>; download_dir?: string };
+  recovery_rounds?: { number: number; started: number; summary?: string }[];
   attempts?: { id: string; local_run_id: string; status: string; result?: Record<string, unknown> }[];
   conclusion?: { reason: string; attempted: string[]; next_actions: string[]; evidence: string[] };
   evidence?: { id: string; url: string }[];

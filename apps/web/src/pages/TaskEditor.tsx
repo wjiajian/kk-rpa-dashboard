@@ -26,7 +26,6 @@ export default function TaskEditor() {
       appId: initialApp.id,
       version: initialApp.version,
       robot: robots[0].id,
-      account: "",
       brand: "全部品牌",
       filename: "report.xlsx",
       date: defaultDate,
@@ -170,15 +169,6 @@ export default function TaskEditor() {
                   label: `${r.name} · ${r.status}`,
                 }))}
                 onChange={(robot) => update({ robot })}
-              />
-              <label>
-                账号别名 <span>*</span>
-              </label>
-              <Input
-                aria-label="账号别名"
-                placeholder="例如 STORE_001"
-                value={task.account}
-                onChange={(e) => update({ account: e.target.value })}
               />
               <label>
                 登录密码 <span>*</span>

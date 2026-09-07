@@ -28,7 +28,6 @@ export function useTrigger() {
           appId: task.appId,
           version: task.version,
           robot: task.robot,
-          account: task.account,
           params: {
             target_date:
               task.date.kind === "fixed"

@@ -158,7 +158,6 @@ export default function RunDetail({
                 children: `${apps.find((a) => a.id === run.appId)?.name} · v${run.version}`,
               },
               { key: "robot", label: "执行机器人", children: run.robot },
-              { key: "account", label: "账号别名", children: run.account },
               { key: "source", label: "触发来源", children: run.source },
               {
                 key: "time",
@@ -240,7 +239,7 @@ export default function RunDetail({
           >
             <div className="log-stream">
               {count ? (
-                logSteps.slice(0, count).map((s, i) => {
+                logSteps.slice(0, count).map((s, i) => ({ s, i })).reverse().map(({ s, i }) => {
                   const failed = run.status === "失败" && i === count - 1;
                   if (errorsOnly && !failed) return null;
                   return (

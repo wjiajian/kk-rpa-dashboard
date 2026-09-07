@@ -22,7 +22,7 @@ async function api(path: string, body?: unknown, signal?: AbortSignal) {
   return response.json();
 }
 
-type Job = { console_run_id: string; execution_attempt_id: string; lease: string; remaining_seconds: number };
+type Job = { console_run_id: string; execution_attempt_id: string; lease: string; remaining_seconds: number; recovery_round: number; max_recovery_rounds: number };
 async function run(job: Job, abort: AbortController) {
   const path = `/internal/runs/${job.console_run_id}`;
   let activeSession: Awaited<ReturnType<typeof makeSession>> | undefined;
@@ -51,7 +51,7 @@ async function run(job: Job, abort: AbortController) {
     });
     abort.signal.addEventListener("abort", () => { void activeSession?.session.abort(); }, { once: true });
     abort.signal.throwIfAborted();
-    await activeSession.session.prompt(`处理控制台运行 ${job.console_run_id} 的当前失败尝试 ${job.execution_attempt_id}。先读取最新 context 和 observe；历史工具调用不可重发。`);
+    await activeSession.session.prompt(`处理控制台运行 ${job.console_run_id} 的当前失败尝试 ${job.execution_attempt_id}。这是第 ${job.recovery_round}/${job.max_recovery_rounds} 轮完整接管，累计剩余 ${Math.ceil(job.remaining_seconds)} 秒。先读取最新 context 和 observe；历史工具调用不可重发。结束时通过 resume 或 give_up 的 summary 提交本轮最终总结。`);
     if (!activeSession.gate.finished && !abort.signal.aborted) {
       await api(`${path}/agent-failed`, { lease: job.lease });
     }

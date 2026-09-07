@@ -52,7 +52,6 @@ class StrictModel(BaseModel):
 class Snapshot(StrictModel):
     app_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
-    account_id: str = Field(min_length=1)
     inputs: dict
     download_dir: str | None = None
 
@@ -321,17 +320,19 @@ def create_app(config=None, database=None):
                 with db.transaction() as s:
                     batch = list(s.scalars(select(Event).where(Event.run_id == run_id, Event.seq > cursor).order_by(Event.seq).limit(100)))
                 for event in batch:
+                    cursor = event.seq
+                    if event.data["kind"] == "operation":
+                        continue
                     data = {"seq": event.seq, **event.data}
                     if business:
                         data = {key: data[key] for key in ("seq", "kind", "message", "at")}
-                    cursor = event.seq
                     yield f"id: {cursor}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
                 yield ": keepalive\n\n"
                 await asyncio.sleep(1)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     def save_image(message):
-        result = message.get("result", {})
+        result = message.get("data" if message["type"] == "evidence" else "result", {})
         image = result.pop("image", None)
         if not image:
             return
@@ -339,7 +340,8 @@ def create_app(config=None, database=None):
         if image["mimeType"] != "image/png" or not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) > 8 * 1024 * 1024:
             raise Conflict("截图格式或大小无效")
         # Stable attachment identity makes duplicate result replay idempotent.
-        evidence_id = sha256((message["console_run_id"] + message["request_id"]).encode()).hexdigest()
+        reference = f"event:{message['seq']}" if message["type"] == "evidence" else message["request_id"]
+        evidence_id = sha256((message["console_run_id"] + reference).encode()).hexdigest()
         (evidence_root / evidence_id).write_bytes(data)
         with db.transaction() as s:
             if not s.get(Evidence, evidence_id):
@@ -370,13 +372,23 @@ def create_app(config=None, database=None):
                 if message["type"] == "ready":
                     connected.add(robot_id)
                     continue
-                if message["type"] == "result":
+                if message["type"] in {"result", "evidence"}:
                     with db.transaction() as s:
-                        op = s.get(Operation, message["request_id"])
-                        source = s.get(Run, op.run_id) if op else None
+                        if message["type"] == "result":
+                            op = s.get(Operation, message["request_id"])
+                            source = s.get(Run, op.run_id) if op else None
+                            if op and message["execution_attempt_id"] != op.data["body"]["execution_attempt_id"]:
+                                raise Conflict("证据与操作尝试不匹配")
+                        else:
+                            source = s.get(Run, message["console_run_id"])
+                            if (source and message["seq"] > source.data["executor_seq"]
+                                    and message["execution_attempt_id"] != source.data["attempt_id"]):
+                                raise Conflict("证据与执行尝试不匹配")
                         if not source or source.robot_id != robot_id or source.id != message["console_run_id"]:
                             raise Conflict("证据与请求归属不匹配")
-                    save_image(message)
+                        duplicate = message["seq"] <= source.data["executor_seq"]
+                    if not duplicate:
+                        save_image(message)
                 seq = control.accept_message(robot_id, message)
                 await socket.send_json({"type": "ack", "console_run_id": message["console_run_id"], "seq": seq})
         except (WebSocketDisconnect, ValueError, KeyError, asyncio.TimeoutError):

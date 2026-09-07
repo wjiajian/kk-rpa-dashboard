@@ -14,7 +14,7 @@ def env(tmp_path):
     c = Control(db, lambda: now[0])
     robot = c.add_robot("robot")
     c.reconcile(robot["id"], {"deployments": [{"app_id": "app", "version": "1"}], "requests": {}})
-    run = c.create_run(robot["id"], {"app_id": "app", "version": "1", "account_id": "A", "inputs": {"date": "2099-01-01"}, "download_dir": "/downloads"}, "demo")
+    run = c.create_run(robot["id"], {"app_id": "app", "version": "1", "inputs": {"date": "2099-01-01"}, "download_dir": "/downloads"}, "demo")
     return Harness(c, db, robot["id"], run, now)
 
 
@@ -50,6 +50,8 @@ class Harness:
         self.result(op)
         return self.c.claim(self.run, {self.robot})
     def tool(self, job, action, params=None, request="tool-1"):
+        if action in {"resume", "give_up"}:
+            params = {"summary": "已检查现场，提交本轮接管结果。", **(params or {})}
         self.c.tool(self.run, job["lease"], job["execution_attempt_id"], request, action, params or {}, {self.robot})
         return self.c.commands(self.robot)[0]
 
@@ -167,6 +169,17 @@ def test_preparation_failure_does_not_open_recovery(env):
     assert env.c.commands(env.robot)[0]["action"] == "stop"
 
 
+def test_environment_failure_is_visible_without_agent_tool_logs(env):
+    env.c.tick({env.robot})
+    start = env.c.commands(env.robot)[0]
+    env.result(start, "failed", {"phase": "prepare", "error": "本机未部署指定应用版本"})
+    with env.db.transaction() as s:
+        events = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run))]
+    failure = next(e for e in events if e["kind"] == "preparation_failed")
+    assert failure["details"]["error"] == "本机未部署指定应用版本"
+    assert not any(e["kind"] in {"operation", "agent_summary"} for e in events)
+
+
 def test_queue_keeps_same_robot_until_confirmation(env):
     env.recover()
     second = env.c.create_run(env.robot, env.state()["snapshot"], "next")
@@ -196,3 +209,80 @@ def test_resume_rejection_keeps_source_and_budget(env):
     assert env.state()["attempt_id"] == job["execution_attempt_id"]
     assert env.state()["phase"] == "recovery"
     assert env.state()["recovery_since"] == 1000
+
+
+def test_three_complete_recovery_rounds_stop_before_fourth_and_preserve_time_budget(env):
+    job = env.recover()
+    for number in range(1, 4):
+        assert job["recovery_round"] == number
+        assert job["max_recovery_rounds"] == 3
+        # Several operations in one takeover do not consume extra rounds.
+        for action in ("context", "observe", "act"):
+            env.result(env.tool(job, action, request=f"{number}-{action}"))
+        env.now[0] += 10
+        resume = env.tool(job, "resume", {"from_step": "S2", "summary": f"第 {number} 轮：已提交 S2，等待原程序校验。"}, request=f"resume-{number}")
+        env.send("program_started", {"local_run_id": f"local-{number + 1}"})
+        env.now[0] += 4000  # Program time is still outside the 900-second budget.
+        env.send("attempt_finished", {"local_run_id": f"local-{number + 1}", "status": "failed", "recoverable": True})
+        env.result(resume)
+        env.c = Control(env.db, lambda: env.now[0])
+        env.c.tick({env.robot})
+        if number < 3:
+            opening = env.c.commands(env.robot)[0]
+            assert opening["action"] == "open_recovery"
+            env.send("recovery_started")
+            env.result(opening)
+            job = env.c.claim(env.run, {env.robot})
+    env.c.tick({env.robot})
+    assert env.state()["stop_reason"] == "rounds_exhausted"
+    assert remaining(env.state(), env.now[0]) == BUDGET - 30
+    assert [c["action"] for c in env.c.commands(env.robot)] == ["stop"]
+    with pytest.raises(Conflict):
+        env.c.claim(env.run, {env.robot})
+    assert env.owned() == env.run
+    env.send("ended")
+    assert env.owned() is None
+    with env.db.transaction() as s:
+        events = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run))]
+    assert len([e for e in events if e["kind"] == "agent_summary"]) == 3
+    assert not any(e["kind"] == "operation" for e in events)
+
+
+def test_expired_or_disconnected_agent_cannot_reset_the_round_limit(env):
+    job = env.recover()
+    for number in (2, 3):
+        env.c.disconnect(env.robot)
+        env.c.reconcile(env.robot, {"active_run": env.run, "phase": "recovery",
+            "execution_attempt_id": job["execution_attempt_id"], "journal_complete": True, "requests": {}})
+        env.c = Control(env.db, lambda: env.now[0])
+        job = env.c.claim(env.run, {env.robot})
+        assert job["recovery_round"] == number
+    env.now[0] += 31
+    with pytest.raises(Conflict, match="3 轮"):
+        env.c.claim(env.run, {env.robot})
+    env.c.tick({env.robot})
+    assert env.state()["stop_reason"] == "rounds_exhausted"
+    assert len(env.state()["recovery_rounds"]) == 3
+
+
+def test_resume_requires_one_final_summary_and_duplicate_does_not_repeat_it(env):
+    job = env.recover()
+    with pytest.raises(Conflict, match="总结"):
+        env.tool(job, "resume", {"summary": " ", "from_step": "S2"})
+    assert env.state()["phase"] == "recovery"
+    summary = "已恢复报表页并提交 S2，等待原校验。"
+    op = env.tool(job, "resume", {"summary": summary, "from_step": "S2"})
+    env.c.tool(env.run, job["lease"], job["execution_attempt_id"], op["request_id"], "resume", op["params"], {env.robot})
+    with env.db.transaction() as s:
+        events = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run)) if e.data["kind"] == "agent_summary"]
+    assert len(events) == 1
+    assert events[0]["message"] == f"Agent 第 1 轮接管总结\n{summary}"
+
+
+def test_budget_exhaustion_stops_first_round_and_records_its_conclusion(env):
+    env.recover()
+    env.now[0] += BUDGET
+    env.c.tick({env.robot})
+    assert env.state()["stop_reason"] == "budget_exhausted"
+    assert len(env.state()["recovery_rounds"]) == 1
+    assert "900 秒" in env.state()["recovery_rounds"][0]["summary"]

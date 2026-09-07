@@ -13,6 +13,7 @@ TERMINAL = {"succeeded", "failed", "stopped", "cancelled"}
 TOOLS = {"context", "observe", "act", "credential", "resume", "give_up"}
 PENDING = {"accepted", "running", "unknown"}
 BUDGET = 900.0
+MAX_RECOVERY_ROUNDS = 3
 
 
 class Conflict(ValueError):
@@ -56,6 +57,26 @@ class Control:
             "attempt_id": data.get("attempt_id"), "details": details or {},
         }))
 
+    def finish_round(self, s, run, data, summary=None):
+        rounds = data.get("recovery_rounds", [])
+        if not rounds or rounds[-1].get("summary"):
+            return
+        current = rounds[-1]
+        if summary is None:
+            summary = {
+                "budget_exhausted": "累计接管时间已达到 900 秒，本轮接管结束。",
+                "rounds_exhausted": "已达到 3 轮接管上限，结束接管并等待执行端收尾。",
+                "administrator": "管理员已请求停止，本轮接管结束。",
+                "agent_unavailable": "Agent 未能完成本轮接管，已请求停止。",
+                "requires_administrator": "检测到人工验证，本轮接管结束，请管理员处理后重跑。",
+            }.get(data.get("stop_reason"), "本轮接管中断，未提交可继续执行的恢复结果。")
+        if self.credentials is not None:
+            for secret in sorted(self.credentials.read(s, run.id).values(), key=len, reverse=True):
+                summary = summary.replace(secret, "<redacted>")
+        current.update(summary=summary, ended=self.clock())
+        self.event(s, run, data, "agent_summary", f"Agent 第 {current['number']} 轮接管总结\n{summary}",
+                   details={"round": current["number"]})
+
     def create_run(self, robot_id, snapshot, name, rerun_of=None, credentials=None):
         with self.db.transaction() as s:
             robot = self.db.lock_robot(s, robot_id)
@@ -68,6 +89,7 @@ class Control:
                 "name": name, "snapshot": deepcopy(snapshot), "rerun_of": rerun_of,
                 "status": "queued", "phase": "queued", "attempt_id": uid(), "attempts": [],
                 "recovery_used": 0.0, "recovery_since": None, "seq": 0,
+                "recovery_rounds": [],
                 "stop_reason": None, "lease": None, "executor_seq": 0,
             })
             s.add(run)
@@ -130,6 +152,7 @@ class Control:
                             # Never dispatched, so no executor can own this attempt.
                             d.update(status="stopped" if reason == "administrator" else "failed", phase="ended", ended=self.clock())
                             robot.active_run = None
+            self.finish_round(s, run, d)
             self.event(s, run, d, "stop_requested", "运行在下发执行前取消" if d["phase"] == "ended" else "停止请求已记录，等待执行端确认")
             run.data = d
 
@@ -162,7 +185,12 @@ class Control:
                 elif d.get("recovery_since") is not None and remaining(d, now) <= 0:
                     d["stop_reason"] = d["stop_reason"] or "budget_exhausted"
                     d["lease"] = None
+                elif (d["phase"] == "recovery" and len(d.get("recovery_rounds", [])) >= MAX_RECOVERY_ROUNDS
+                      and (not d.get("lease") or d["lease"]["expires"] <= now)):
+                    d["stop_reason"] = d["stop_reason"] or "rounds_exhausted"
+                    d["lease"] = None
                 if d["stop_reason"]:
+                    self.finish_round(s, run, d)
                     d["status"] = "stopping" if online else "uncertain"
                     ops = list(s.scalars(select(Operation).where(Operation.run_id == run.id)))
                     for op in ops:
@@ -177,7 +205,12 @@ class Control:
                 elif not online and d["phase"] != "queued":
                     d["status"] = "uncertain"
                 elif d["phase"] == "failed" and not self.pending(s, run.id):
-                    if not d.get("recoverable") or remaining(d, now) <= 0:
+                    if len(d.get("recovery_rounds", [])) >= MAX_RECOVERY_ROUNDS:
+                        d["stop_reason"] = "rounds_exhausted"
+                        d["conclusion"] = {"reason": "已达到 3 轮接管上限，程序仍未完成。",
+                            "attempted": ["已分配 3 轮 Agent 接管"],
+                            "next_actions": ["管理员检查失败原因后重跑"], "evidence": []}
+                    elif not d.get("recoverable") or remaining(d, now) <= 0:
                         d["stop_reason"] = "not_recoverable"
                     else:
                         d["phase"] = "opening"
@@ -283,14 +316,15 @@ class Control:
                     d["lease"] = None
                 if od["status"] == "failed" and od["body"]["action"] in {"start", "open_recovery"}:
                     d["stop_reason"] = "executor_error"
+                    self.event(s, run, d, "preparation_failed", "执行环境准备失败" if od["body"]["action"] == "start" else "无法打开接管现场",
+                               details=od["result"])
                 if od["status"] == "failed" and od["body"]["action"] == "resume" and d["phase"] == "submitting":
                     if od["result"].get("recovery_active"):
                         d.update(attempt_id=od["body"]["execution_attempt_id"], phase="recovery", status="recovering", lease=None)
                     else:
                         d.update(status="uncertain", stop_reason="resume_result_unknown", lease=None)
-                if od["status"] in {"succeeded", "failed"}:
-                    self.event(s, run, d, "operation", "接管操作已完成" if od["status"] == "succeeded" else "接管操作失败，需重新观察",
-                               details={"action": od["body"]["action"], "status": od["status"], "result": od["result"]})
+                if od["result"].get("screenshot_missing"):
+                    self.event(s, run, d, "evidence_missing", "现场截图未取得：" + od["result"]["screenshot_missing"])
             else:
                 if message["execution_attempt_id"] != d["attempt_id"]:
                     raise Conflict("拒绝旧尝试事件")
@@ -327,6 +361,7 @@ class Control:
                     self.event(s, run, d, kind, {"succeeded": "程序及原校验通过，等待收尾确认", "failed": "本次执行失败", "stopped": "程序已在步骤边界停止"}[status], details=payload)
                 elif kind == "ended":
                     pause_budget(d, at)
+                    self.finish_round(s, run, d)
                     status = "failed"
                     if d.get("last_result", {}).get("status") == "succeeded":
                         status = "succeeded"
@@ -342,6 +377,10 @@ class Control:
                     # Business messages are a fixed vocabulary, never raw diagnostics.
                     labels = {"step.started": "步骤开始", "step.succeeded": "步骤通过原校验", "step.failed": "步骤失败"}
                     self.event(s, run, d, kind, (payload.get("step_name", "") + "：" if payload.get("step_name") else "") + labels.get(payload.get("event_type"), "程序执行事件"), details=payload)
+                elif kind == "evidence":
+                    self.event(s, run, d, kind, "现场截图已上传", details=payload)
+                elif kind == "evidence_missing":
+                    self.event(s, run, d, kind, "现场截图未取得：" + payload["reason"], details=payload)
                 else:
                     raise Conflict("未知执行事件")
             d["executor_seq"] = seq
@@ -357,10 +396,16 @@ class Control:
                     or robot.id not in connected or not robot.credential_hash or remaining(d, now) <= 0
                     or (lease and lease["expires"] > now) or self.pending(s, run.id)):
                 raise Conflict("当前运行不能分配 Agent")
+            rounds = d.setdefault("recovery_rounds", [])
+            if len(rounds) >= MAX_RECOVERY_ROUNDS:
+                raise Conflict("已达到 3 轮接管上限")
+            self.finish_round(s, run, d)
+            rounds.append({"number": len(rounds) + 1, "started": now, "attempt_id": d["attempt_id"]})
             d["lease"] = {"id": uid(), "expires": now + 30}
             run.data = d
             return {"console_run_id": run.id, "execution_attempt_id": d["attempt_id"],
-                    "lease": d["lease"]["id"], "remaining_seconds": remaining(d, now)}
+                    "lease": d["lease"]["id"], "remaining_seconds": remaining(d, now),
+                    "recovery_round": len(rounds), "max_recovery_rounds": MAX_RECOVERY_ROUNDS}
 
     def agent_state(self, run_id, lease_id, renew=False):
         with self.db.transaction() as s:
@@ -394,6 +439,11 @@ class Control:
                 d["conclusion"] = params
                 d["lease"] = None
             op_id = self.enqueue(s, run, d, action, params, request_id)
+            if action in {"resume", "give_up"}:
+                summary = params.get("summary")
+                if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
+                    raise Conflict("请提交本轮最终接管总结（1–4000 字）")
+                self.finish_round(s, run, d, summary.strip())
             if action == "resume":
                 # Resume commands keep the source attempt in their envelope.
                 op = s.get(Operation, op_id)

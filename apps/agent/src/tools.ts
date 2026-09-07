@@ -42,8 +42,8 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
       return gate.run(name, async () => {
         signal?.throwIfAborted();
         const reply = await invoke(id, name, params as Record<string, unknown>, signal);
-        if (reply.status !== "succeeded") throw new Error(JSON.stringify(reply.result));
         const { image, ...result } = reply.result;
+        if (reply.status !== "succeeded" || result.observation_error) throw new Error(JSON.stringify(result));
         return { content: [
           { type: "text" as const, text: JSON.stringify(result) },
           ...(image ? [{ type: "image" as const, data: image.data, mimeType: image.mimeType }] : []),
@@ -63,10 +63,12 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
     })),
     tool("credential", "在最终输入处使用原账号凭据字段；返回值不包含明文。", object({ field: Type.String(), target: Type.String() })),
     tool("resume", "提交恢复点，可附失败步骤的真实结果及有 DOM 证据的定位器。交回原 verify/resume；接受请求不代表成功。", object({
+      summary: Type.String({ minLength: 1, maxLength: 4000, description: "本轮最终总结：观察结论、已做的动作、提交的步骤及等待原程序校验。" }),
       from_step: Type.String(), step_result: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       locator_overrides: Type.Optional(Type.Record(Type.String(), Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()])))),
     })),
     tool("give_up", "无法恢复或需人工/开发处理时，记录具体原因、尝试、证据及后续事项，然后结束本次接管。", object({
+      summary: Type.String({ minLength: 1, maxLength: 4000, description: "本轮最终总结：已尝试事项、无法恢复的原因及后续处理。" }),
       reason: Type.String({ minLength: 1 }), attempted: Type.Array(Type.String()),
       next_actions: Type.Array(Type.String()), evidence: Type.Array(Type.String()),
     })),

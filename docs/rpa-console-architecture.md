@@ -145,7 +145,7 @@ erDiagram
 | `ApplicationSource` 应用来源 | Git 仓库或上传来源、来源名称；访问凭据单独保护 |
 | `Application` 应用 | 来源、稳定 `app_id`、名称、应用相对目录 |
 | `ApplicationRelease` 应用版本 | 包版本、Git commit（若有）、源码位置、入口和该版本表单声明 |
-| `Task` 任务 | 名称、选定应用版本、机器人、账号别名、业务参数绑定、定时配置 |
+| `Task` 任务 | 名称、选定应用版本、机器人、业务参数绑定、定时配置 |
 | `Run` 控制台运行 | 来源任务、触发人/来源、计划及创建时间、应用版本、机器人、账号、实际业务参数、状态 |
 | `ExecutionAttempt` 执行尝试 | 所属控制台运行、执行机本地 `run_id`、首次执行或续跑、前一次尝试及结果 |
 | `Robot` 机器人 | 名称、状态、已部署版本、当前占用运行 |
@@ -159,9 +159,9 @@ erDiagram
 
 ### 3.2 保存参数与凭据
 
-任务参数分为三个部分：账号别名、普通业务参数、凭据。`credentials` 中的字段独立加密保存，服务端密钥与数据库分开管理；不写入普通 `Run`、业务日志、API 客户端缓存或源码包。
+任务参数分为普通业务参数与凭据。`credentials` 中的字段独立加密保存，服务端密钥与数据库分开管理；不写入普通 `Run`、业务日志、API 客户端缓存或源码包。
 
-账号别名绑定具体业务账号。更换实际业务账号时使用新的别名，更新密码保持原绑定；从头重跑与身份校验以源运行对应的账号为准。
+控制台无需账号别名，业务身份由登录凭据和预期身份校验确定。执行端按控制台 Run ID 隔离浏览器 Profile，同次接管与续跑沿用该 Profile。
 
 管理员编辑已配置的密码时，页面显示“已配置”。未提交该字段表示沿用已保存值，显式提交新值才替换；“已配置”或星号不能作为真实密码发给程序。
 
@@ -175,7 +175,6 @@ erDiagram
 
 ```json
 {
-  "account_id": "STORE_001",
   "input_bindings": {
     "target_date": {
       "kind": "relative_date",
@@ -276,7 +275,7 @@ ui_schema = "form.ui.json"
 
 `contract_version` 仅表示声明格式，不是应用版本。应用版本仍读取 `pyproject.toml` 和 Git。`application` 指向现有 `ApplicationDefinition` 对象，只在执行机的应用环境中加载；`entrypoint` 保持原 CLI 入口。
 
-`form.schema.json` 声明实际传给应用的参数结构，按 `RunRequest` 的 `account_id / inputs / credentials` 分组。京麦示例：
+`form.schema.json` 声明控制台接受的 `inputs / credentials` 参数结构；内部 Profile 标识由执行桥生成。京麦示例：
 
 ```json
 {
@@ -284,13 +283,8 @@ ui_schema = "form.ui.json"
   "title": "京麦商品明细导出参数",
   "type": "object",
   "additionalProperties": false,
-  "required": ["account_id", "inputs", "credentials"],
+  "required": ["inputs", "credentials"],
   "properties": {
-    "account_id": {
-      "type": "string",
-      "title": "账号别名",
-      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
-    },
     "inputs": {
       "type": "object",
       "title": "业务参数",
@@ -382,7 +376,7 @@ ui_schema = "form.ui.json"
 
 ```python
 request = RunRequest(
-    account_id=console_run.account_id,
+    account_id="RUN_" + console_run.id.replace("-", "").upper(),
     inputs=console_run.resolved_inputs,
     credentials=decrypted_run_credentials,
 )

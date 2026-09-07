@@ -10,8 +10,8 @@ export function assembleTask(task: Task, newPassword?: string) {
   };
 }
 export function validateTask(task: Task) {
-  if (!task.name.trim() || !task.account.trim())
-    return "请填写任务名称和账号别名";
+  if (!task.name.trim())
+    return "请填写任务名称";
   if (!task.brand || !/^[^/\\]+\.xlsx$/.test(task.filename))
     return "请填写品牌和有效的 .xlsx 导出文件名";
   if (

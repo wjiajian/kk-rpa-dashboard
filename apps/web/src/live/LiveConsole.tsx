@@ -69,7 +69,7 @@ function NewRun({ open, close }: { open: boolean; close: () => void }) {
       if (!inputs || Array.isArray(inputs) || typeof inputs !== "object") throw new Error("业务参数必须是 JSON 对象");
       setBusy(true);
       const run = await api<{ id: string }>("/runs", { name: values.name, robot_id: values.robot_id, credentials: values.credentials,
-        snapshot: { ...release, account_id: values.account_id, inputs, download_dir: values.download_dir || null } });
+        snapshot: { ...release, inputs, download_dir: values.download_dir || null } });
       form.resetFields(); close(); navigate(`/runs/${run.id}`);
     } catch (error) { if (error instanceof Error) void message.error(error.message); }
     finally { setBusy(false); }
@@ -78,7 +78,6 @@ function NewRun({ open, close }: { open: boolean; close: () => void }) {
       <Form.Item name="name" label="运行名称" rules={[{ required: true }]}><Input /></Form.Item>
       <Form.Item name="robot_id" label="机器人" rules={[{ required: true }]}><Select options={robots?.filter(r => !r.revoked).map(r => ({ value: r.id, label: `${r.name} · ${r.online ? "在线" : "离线"}` }))} onChange={() => form.setFieldValue("release", undefined)} /></Form.Item>
       <Form.Item name="release" label="已部署应用 / 版本" rules={[{ required: true }]}><Select options={robot?.deployments.map(d => ({ value: `${d.app_id}@${d.version}`, label: `${d.app_id} · ${d.version}` }))} /></Form.Item>
-      <Form.Item name="account_id" label="账号别名" rules={[{ required: true }]}><Input /></Form.Item>
       <Form.Item name={["credentials", "username"]} label="业务登录账号" rules={[{ required: true }]}><Input autoComplete="off" /></Form.Item>
       <Form.Item name={["credentials", "password"]} label="业务登录密码" rules={[{ required: true }]}><Input.Password autoComplete="new-password" /></Form.Item>
       <Form.Item name={["credentials", "expected_identity"]} label="登录后预期可见身份" extra="用于核对登录后的店铺或账号身份。账号密码随本次运行保存，从头重跑沿用。" rules={[{ required: true }]}><Input autoComplete="off" /></Form.Item>
@@ -103,7 +102,7 @@ function LiveDetail({ business }: { business: boolean }) {
     stream.onerror = () => setStreamError(true);
     stream.onmessage = event => {
       const incoming: RunEvent = JSON.parse(event.data);
-      setEvents(old => old.some(e => e.seq === incoming.seq) ? old : [...old, incoming].sort((a, b) => a.seq - b.seq));
+      setEvents(old => old.some(e => e.seq === incoming.seq) ? old : [...old, incoming].sort((a, b) => b.at - a.at || b.seq - a.seq));
     };
     return () => stream.close();
   }, [id, prefix]);
@@ -120,15 +119,15 @@ function LiveDetail({ business }: { business: boolean }) {
     {["uncertain", "stopping"].includes(run.status) && <Alert type="warning" showIcon message={run.status === "uncertain" ? "状态待确认，机器人继续由本次运行占用。" : "已请求协作停止，等待当前动作结束及执行端确认。"} />}
     {!business && <Panel title="运行与接管"><Descriptions className="panel-padding" column={2} items={[
       { key: "release", label: "应用 / 版本", children: `${run.snapshot?.app_id} · ${run.snapshot?.version}` },
-      { key: "account", label: "原账号别名", children: run.snapshot?.account_id },
       { key: "phase", label: "当前阶段", children: ({ queued: "排队", starting: "准备程序", program: "程序执行", failed: "失败现场", opening: "打开恢复上下文", recovery: "Agent 处理现场", submitting: "等待续跑确认", finishing: "确认收尾", ended: "已结束" } as Record<string, string>)[run.phase ?? ""] },
       { key: "budget", label: "本次运行接管剩余", children: run.remaining_seconds === undefined ? "—" : `${Math.ceil(run.remaining_seconds)} 秒 / 900 秒` },
+      { key: "rounds", label: "接管轮数", children: `${run.recovery_rounds?.length ?? 0} / 3 轮` },
       { key: "source", label: "来源运行", children: run.rerun_of ? <Link to={`/runs/${run.rerun_of}`}>{run.rerun_of}</Link> : "—" },
       { key: "inputs", label: "原业务参数", children: <code>{JSON.stringify(run.snapshot?.inputs)}</code> },
     ]} /></Panel>}
     {run.conclusion && <Panel title="接管结论"><div className="panel-padding"><p>{run.conclusion.reason}</p><p>已尝试：{run.conclusion.attempted.join("；") || "无"}</p><p>后续处理：{run.conclusion.next_actions.join("；") || "无"}</p></div></Panel>}
     <div className="detail-grid"><div><Panel title="执行过程" extra={<Tag>{events.length} 条已记录事件</Tag>}><div className="log-stream">
-      {events.length ? events.map(event => <div className="log-line" key={event.seq}><span className="log-time mono">{date(event.at)}</span><div><strong>{event.message}</strong>{!business && event.details && Object.keys(event.details).length > 0 && <details><summary>查看执行结果</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(event.details, null, 2)}</pre></details>}</div></div>) : <Empty description="尚无执行事件" />}
+      {events.length ? events.map(event => <div className="log-line" key={event.seq}><span className="log-time mono">{date(event.at)}</span><div><strong style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{event.message}</strong>{!business && event.kind !== "agent_summary" && event.details && Object.keys(event.details).length > 0 && <details><summary>查看执行结果</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(event.details, null, 2)}</pre></details>}</div></div>) : <Empty description="尚无执行事件" />}
     </div></Panel></div><div>
       {!business && <Panel title="执行尝试"><Table rowKey="id" pagination={false} dataSource={run.attempts} columns={[
         { title: "尝试", render: (_, attempt, index) => <div>第 {index + 1} 次<div className="small mono">{attempt.local_run_id}</div></div> },

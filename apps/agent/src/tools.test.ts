@@ -28,6 +28,23 @@ test("custom tool allowlist has no programming or arbitrary file tools", () => {
   const definitions = recoveryTools(async () => ({ status: "succeeded", result: {} }), new ToolGate());
   assert.deepEqual(definitions.map(t => t.name), ["context", "observe", "act", "credential", "resume", "give_up"]);
   assert.ok(definitions.every(t => t.executionMode === "sequential"));
+  for (const tool of definitions.filter(t => ["resume", "give_up"].includes(t.name))) {
+    assert.ok(tool.parameters.required?.includes("summary"));
+  }
+});
+
+test("an observation error with a screenshot cannot authorize browser actions", async () => {
+  const gate = new ToolGate();
+  const calls: string[] = [];
+  const definitions = recoveryTools(async (_id, action) => {
+    calls.push(action);
+    return { status: "succeeded", result: { observation_error: "DOM unavailable", image: { mimeType: "image/png", data: "fixture" } } };
+  }, gate);
+  const observe = definitions.find(t => t.name === "observe")!;
+  await assert.rejects(observe.execute("observe-1", {}, undefined, undefined, {} as any));
+  gate.nextTurn();
+  await assert.rejects(gate.run("act", async () => calls.push("unsafe")));
+  assert.deepEqual(calls, ["observe"]);
 });
 
 test("pi Responses serialization keeps images in the associated function output", () => {

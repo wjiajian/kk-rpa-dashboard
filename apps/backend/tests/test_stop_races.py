@@ -19,7 +19,7 @@ def test_stop_before_start_dispatch_has_no_robot_work_to_wait_for(env):
 
 def test_stop_before_resume_dispatch_keeps_executor_source_attempt(env):
     job = env.recover()
-    env.c.tool(env.run, job["lease"], job["execution_attempt_id"], "unsent-resume", "resume", {"from_step": "S2"}, {env.robot})
+    env.c.tool(env.run, job["lease"], job["execution_attempt_id"], "unsent-resume", "resume", {"from_step": "S2", "summary": "提交 S2，等待执行端校验。"}, {env.robot})
     env.c.request_stop(env.run)
     assert env.state()["attempt_id"] == job["execution_attempt_id"]
     env.c.tick({env.robot})
