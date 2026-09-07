@@ -305,3 +305,16 @@ def test_agent_activity_shows_progress_without_dom_or_tool_parameters(env):
     assert activity[-1]["message"] == "第 1 轮 · 点击页面控件：失败，等待处理"
     assert all(e["details"] == {} for e in activity)
     assert all(value not in str(activity) for value in ("private-locator", "private-value", "large DOM dump", "page details"))
+
+
+def test_observation_failure_log_identifies_error_without_raw_dom(env):
+    job = env.recover()
+    command = env.tool(job, "observe", {}, request="observe")
+    env.result(command, result={"observation_error": "TypeError", "observation_stage": "dom", "text": "private DOM"})
+    command = env.tool(job, "observe", {}, request="observe-again")
+    env.result(command, result={"observation_error": "KeyError", "observation_stage": "target", "text": "private DOM"})
+    with env.db.transaction() as s:
+        activity = [e.data for e in s.scalars(select(Event).where(Event.run_id == env.run)) if e.data["kind"] == "agent_activity"]
+    assert any("页面读取失败（TypeError）" in e["message"] for e in activity)
+    assert "观察目标无效（KeyError），请先观察整页" in activity[-1]["message"]
+    assert "private DOM" not in str(activity)

@@ -72,6 +72,12 @@ class Control:
         if result.get("observation_error"):
             status = "failed"
         state = {"running": "执行中", "succeeded": "已完成", "failed": "失败，等待处理", "unknown": "结果待确认"}[status]
+        if result.get("observation_error"):
+            error_type = str(result["observation_error"])
+            error_type = error_type if error_type.isidentifier() and len(error_type) <= 80 else "未知异常"
+            state = f"页面读取失败（{error_type}）"
+            if result.get("observation_stage") == "target":
+                state = f"观察目标无效（{error_type}），请先观察整页"
         if action == "resume" and status == "succeeded":
             state = "执行端已返回，结果以原程序校验为准"
         self.event(s, run, data, "agent_activity", f"第 {operation.get('recovery_round', len(data.get('recovery_rounds', [])))} 轮 · {label}：{state}")
