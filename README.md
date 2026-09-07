@@ -6,7 +6,11 @@ RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行
 
 ## 真实运行模式
 
-按 [部署配置](deploy/.env.example) 准备私有环境变量、飞书登录和 TLS 证书，使用 [Compose](deploy/compose.yaml) 构建服务。生产镜像启用真实模式，提供运行列表/详情、运行发起与重跑、机器人凭据管理、SSE 事件、证据和停止请求。
+测试部署复用 Mac 已运行的 PostgreSQL，使用 ngrok 提供 HTTPS/WSS。保持一个终端运行 `ngrok http 8088 --inspect=false`，另一个终端运行 `python3 deploy/mac.py prepare`。只填写生成的 `deploy/.env` 顶部五项飞书/DeepSeek 配置，登记脚本打印的飞书回调，再运行 `python3 deploy/mac.py up`。
+
+Windows 拉取同级 monorepo 的最新代码，在仓库根目录运行 `.\packages\rpa-executor\start.ps1`；首次输入连接地址和账号凭据后，后续复用本机加密配置。完整步骤见 [简化测试部署](docs/recovery-implementation.md#简化测试部署现有-postgresql--ngrok)。
+
+镜像启用真实模式，提供运行列表/详情、运行发起与重跑、机器人凭据管理、SSE 事件、证据和停止请求。
 
 本地前端使用 `VITE_RUNTIME=live pnpm dev`，通过 `/api` 连接 8000 端口的后端。真实模式不会在接口失败时退回演示状态。应用导入、任务编辑与定时等其余页面仍属于下文的演示模式。
 

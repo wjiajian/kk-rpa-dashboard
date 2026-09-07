@@ -45,43 +45,110 @@ Agent 服务在内部网络轮询后端的接管工作，领取 30 秒可续期�
 
 DOM 观察返回实际节点的 XPath、可见文本和限定属性，临时目标只保存在当前恢复上下文。提交的定位器必须有当前 DOM 观察依据，并经过原 `override_element_locators` 字段检查。原 `expect_count`、`check_at`、应用代码和 `verify` 不变。下载文件名沿用原 `export_filename`。
 
-## 部署
+## 简化测试部署：现有 PostgreSQL + ngrok
 
-### macOS Docker 服务端
+Mac 只运行 Web、后端和 Agent 三个容器。数据库使用已经运行的 PostgreSQL 容器；后端加入其现有 Docker 网络，以容器名连接。ngrok 将公网 HTTPS/WSS 转发到 Mac 的 `127.0.0.1:8088`，不用 hosts、自签证书或 Windows CA 配置。外部仍经过飞书登录和机器人凭据认证。
 
-需要 Docker Desktop、局域网可达的主机名或 IP、与之匹配的 TLS 证书，以及 Windows 信任的签发 CA。入口不能配置为容器 IP 或仅供 Mac 本机访问的 `127.0.0.1`。
+### Mac 首次准备
 
-1. 将 `deploy/.env.example` 复制为忽略的 `deploy/.env`，填写数据库口令、内部服务凭据、DeepSeek 密钥、企业飞书信息、管理员 `open_id` 和对外地址。
-2. `TLS_DIRECTORY` 指向私有证书目录，内含 `server.crt` 和 `server.key`；飞书回调地址为 `${PUBLIC_URL}/api/auth/feishu/callback`。
-3. 构建、启动：
+前置条件：Docker Desktop、Python 3、ngrok 已安装；ngrok 已登录；现有 PostgreSQL 容器运行并有本地管理员访问能力。默认容器名为 `postgresql`。
+
+在 dashboard 仓库根目录，终端一运行并保持：
 
 ```sh
-docker compose --env-file deploy/.env -f deploy/compose.yaml build
-docker compose --env-file deploy/.env -f deploy/compose.yaml up -d
+ngrok http 8088 --inspect=false
 ```
 
-后端启动时执行 Alembic 迁移。后端保持 **一个 Uvicorn worker**，Node Agent 服务保持 **一个实例**；每个服务可同时管理多台机器人。连接对象在该后端进程内，不能直接增加 HTTP worker 数。数据库记录、截图与 pi 会话各用一个持久卷，重建容器保留原卷。
+终端二运行：
 
-Caddy 只暴露 Web 和 `/api/*`，内部 Agent 接口不发布到公网。凭据通过 Authorization 头传输，不进入 URL。机器人专属连接凭据在创建或更换时仅返回一次，服务器保存摘要。
+```sh
+python3 deploy/mac.py prepare
+```
 
-`RETENTION_DAYS` 默认为 30。Agent 服务清理达到期限的已结束会话，再通知后端清理对应事件、截图和运行；活跃 Run 不清理。业务下载始终留在 Windows 原目录。
+脚本从 ngrok 本机接口读取当前 HTTPS 地址，检测 PostgreSQL 用户和 Docker 网络，生成权限为 `0600` 的忽略文件 `deploy/.env`。`prepare` 只准备配置，不创建数据库、不启动应用。重复执行会更新地址和网络，保留已有数据库口令、内部凭据和填写内容。
 
-### Windows 执行端
+只填写 `deploy/.env` 最上方五项：
 
-使用本次修改后的 `kk-rpa-monorepo`。两个应用各自的 `.venv` 必须安装相同 checkout 的 `rpa-core` 扩展，不能只更新 dashboard。
+| 字段 | 内容 |
+| --- | --- |
+| `DEEPSEEK_API_KEY` | DeepSeek 官方 Key |
+| `FEISHU_APP_ID` | 飞书企业自建应用 App ID |
+| `FEISHU_APP_SECRET` | 同一应用的 App Secret |
+| `FEISHU_TENANT_KEY` | 允许登录的企业 tenant_key |
+| `ADMIN_OPEN_IDS` | 本应用内的管理员 open_id；多个用英文逗号分隔 |
 
-1. 在 Windows 登录用户会话内安装两个应用的独立环境，先通过各应用原有 `doctor` 和离线 `test`。
-2. 复制 [config.example.toml](../../kk-rpa-monorepo/packages/rpa-executor/config.example.toml) 为私有配置，填写应用 Python 路径、工作目录、真实业务域名与 TLS CA 文件。`package`、`module` 和 `version` 必须对应本地已部署应用。
-3. 在 dashboard 创建机器人，将其连接凭据配置到 `RPA_ROBOT_CREDENTIAL`。在本机环境变量中配置对应账号的 `credentials_env`；这些字段由执行端在启动 Run 时读取一次，当前 Run 的恢复沿用这份内存值，不重新读取后来变更的账号配置。
-4. 启动执行端：
+在飞书后台设置脚本打印的回调地址 `${PUBLIC_URL}/api/auth/feishu/callback`，发布应用并将测试成员加入可用范围。`tenant_key` 与 `open_id` 可从同一飞书应用的“获取登录用户信息”接口取得。
+
+填写后启动：
+
+```sh
+python3 deploy/mac.py up
+```
+
+启动脚本先检查五项配置，再在现有 PostgreSQL 中创建独立的 `rpa_console` 角色和数据库，最后构建并启动三个服务。不会新建 PostgreSQL 容器、重置已有角色密码、改动现有业务数据库或修改其端口。如果同名数据库已有其他属主，脚本停止并说明原因。
+
+首次启动后，浏览器打开 ngrok 地址，通过飞书登录，在“机器人”页面创建机器人并保存一次性显示的连接凭据。ngrok 免费域名若显示访问提示页，先按页面提示进入。
+
+自定义现有容器名：`python3 deploy/mac.py prepare --postgres-container <container>`；后续 `up` 也使用同一参数。若 ngrok 本机接口不在默认 4040 端口，可用 `--url https://实际域名` 显式传入地址。
+
+### Windows 首次准备
+
+安装 Google Chrome 和 uv，把本次更新后的完整 `kk-rpa-monorepo` 放到任意目录。保留 `apps` 与 `packages` 的相对结构，不复制 Mac 的 `.venv`。
+
+未安装 uv 时：
 
 ```powershell
-uv run --project packages/rpa-executor rpa-executor --config C:/rpa/private/executor.toml
+winget install --id astral-sh.uv -e
 ```
 
-执行端主进程持有 WSS 与持久请求日志，每个 Run 用所选应用自己的 Python 启动固定 `worker.py`。Node 模型循环始终在服务器。业务凭据留在 Windows 注入；本次实现不增加 dashboard 的凭据输入表单或通用凭据托管。
+重新打开 PowerShell，在 monorepo 根目录运行：
 
-机器人上线并报告部署版本后，管理员可从运行列表发起运行，填写原账号别名和应用真实业务参数。日期须填写确定的实际值。应用导入、定时调度和原演示任务编辑尚未接入这个运行入口。
+```powershell
+.\packages\rpa-executor\start.ps1
+```
+
+若 PowerShell 提示禁止运行脚本，用下面的命令启动；执行策略仅作用于这次进程：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packages\rpa-executor\start.ps1
+```
+
+脚本自动为执行端和两个应用同步 Python 3.12 独立环境，首次只询问：控制台 HTTPS 地址、机器人连接凭据、聚水潭及京麦各自的用户名、密码和页面预期身份。
+
+应用路径、版本、模块名、WSS 地址和环境变量映射由现有模板提供，不用手填 TOML。相对路径以配置文件所在目录为基准，不受 PowerShell 当前目录影响。两个应用在控制台的账号别名均为 `STORE_001`。
+
+配置写入忽略的 `packages/rpa-executor/config.local.toml`；凭据通过 Windows DPAPI 加密写入同目录 `credentials.local.clixml`，仅创建它的 Windows 用户在同一电脑上可解密。运行时注入当前执行端的进程环境，结束后恢复调用窗口原有环境变量。日期、品牌、文件名仍在控制台发起 Run 时填写。
+
+以后启动仍只运行同一条命令。更新地址或重新录入凭据：
+
+```powershell
+.\packages\rpa-executor\start.ps1 -ServerUrl https://新的测试域名
+.\packages\rpa-executor\start.ps1 -Configure
+```
+
+首次在有桌面的 Windows 登录用户会话内联调。执行端上线后，控制台应显示“在线”、两个已部署应用版本和空闲状态。真实业务与 Windows DPAPI 的现场验收仍需在该 Windows 电脑完成。
+
+### 日常操作与验证
+
+```sh
+python3 deploy/mac.py status
+python3 deploy/mac.py down
+python3 deploy/mac.py up
+```
+
+以上命令在 dashboard 根目录执行。`down` 只关闭本项目三个服务，保留证据/会话卷，不关闭共享 PostgreSQL、不删除其数据库；ngrok 在终端一用 Ctrl+C 停止。ngrok 地址变化时重新执行 `prepare`，同步飞书回调和 Windows 地址，再执行 `up`。`up` 会应用 `.env` 变更。
+
+健康检查：`curl -H 'ngrok-skip-browser-warning: 1' https://实际域名/api/health`，应返回 `{"status":"ok","mode":"live"}`。查看日志：
+
+```sh
+docker compose --env-file deploy/.env -f deploy/compose.yaml logs --tail=100 backend agent web
+```
+
+部署脚本离线测试：`python3 -m unittest discover -s deploy/tests -v`。Windows 执行桥离线测试：在 monorepo 运行 `uv run --project packages/rpa-executor pytest packages/rpa-executor/tests`。
+
+后端保持一个 Uvicorn worker，Agent 保持一个实例。截图和 pi 会话仍使用持久卷；Run、Attempt、预算与事件存在共享 PostgreSQL 的独立应用库中。`RETENTION_DAYS` 默认 30，仅清理达到期限的已结束运行。业务下载保留在 Windows 原目录。应用导入和定时调度仍未接入此次运行入口。
+
+接口依据：[ngrok WebSocket](https://ngrok.com/docs/using-ngrok-with/websockets/)、[Docker 共享网络](https://docs.docker.com/compose/how-tos/networking/)、[uv 安装](https://docs.astral.sh/uv/getting-started/installation/)、[Windows 加密凭据](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-clixml)、[PowerShell 执行策略](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies)。
 
 ## 断连和停止语义
 
@@ -105,12 +172,16 @@ uv run --project packages/rpa-executor rpa-executor --config C:/rpa/private/exec
 | 后端权限、停止竞态、预算、请求去重、WSS 接管/续跑链路 | 16 项通过 |
 | PostgreSQL 并发互斥与持久化补传 | 2 项通过 |
 | PostgreSQL Alembic 初始迁移 | 通过 |
-| Windows 执行桥日志、中文管道编码、重连确认与操作边界离线测试 | 11 项通过 |
+| Windows 执行桥日志、中文管道编码、重连确认、操作边界与配置相对路径离线测试 | 13 项通过 |
+| Mac 配置生成、凭据保留、ngrok 地址匹配与数据库初始化边界 | 6 项通过 |
+| 隔离 PostgreSQL 17 的首次建库、重复初始化、容器地址认证与错误口令拒绝 | 通过；重复初始化不重置已有角色密码 |
+| Windows 启动脚本 PowerShell 语法检查 | 通过；Windows DPAPI 实机验证待执行 |
 | RPA 核心回归与新增公共调用/停止/verify 拒绝 | 168 项通过 |
 | 聚水潭应用离线回归 | 23 项通过 |
 | 京麦应用离线回归 | 21 项通过 |
 | 运行详情浏览器检查 | 原运行、预算、Attempt、结论和 SSE 日志可见；使用明确标注的离线样例 |
 | Docker Compose 配置与三服务镜像构建 | 通过 |
+| 简化部署后的 Compose 配置、Web 镜像重建与 Caddy 配置检查 | 通过 |
 | 飞书真实企业登录 | 尚未执行 |
 | DeepSeek 官方视觉与 Windows 真实接管 | 尚未执行 |
 

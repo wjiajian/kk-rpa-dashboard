@@ -1,18 +1,5 @@
 name: rpa-console
 services:
-  postgres:
-    image: postgres:17
-    environment:
-      POSTGRES_DB: rpa
-      POSTGRES_USER: rpa
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
-    volumes: [postgres:/var/lib/postgresql/data]
-    healthcheck:
-      test: [CMD-SHELL, "pg_isready -U rpa -d rpa"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
   backend:
     build:
       context: ..
@@ -28,8 +15,7 @@ services:
       EVIDENCE_DIR: /data/evidence
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
     volumes: [evidence:/data/evidence]
-    depends_on:
-      postgres: {condition: service_healthy}
+    networks: [default, database]
     restart: unless-stopped
   agent:
     build:
@@ -50,16 +36,14 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.node
       target: web
-    environment:
-      PUBLIC_HOST: ${PUBLIC_HOST:?required}
-    ports: ["${HTTPS_PORT:-443}:443"]
-    volumes:
-      - ${TLS_DIRECTORY:?required}:/certs:ro
-      - caddy:/data
+    # ngrok runs on the Mac and provides the public HTTPS/WSS endpoint.
+    ports: ["127.0.0.1:${WEB_PORT:-8088}:80"]
     depends_on: [backend]
     restart: unless-stopped
 volumes:
-  postgres:
   evidence:
   sessions:
-  caddy:
+networks:
+  database:
+    external: true
+    name: ${POSTGRES_NETWORK:?run python3 deploy/mac.py prepare}
