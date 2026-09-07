@@ -1,0 +1,13 @@
+{$PUBLIC_HOST} {
+    tls /certs/server.crt /certs/server.key
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            flush_interval -1
+        }
+    }
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}

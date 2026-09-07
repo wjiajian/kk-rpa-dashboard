@@ -3,8 +3,9 @@
   "private": true,
   "scripts": {
     "dev": "pnpm --filter @rpa/web dev",
-    "build": "pnpm --filter @rpa/web build",
-    "test": "pnpm --filter @rpa/web test"
+    "build": "pnpm --filter @rpa/agent build && pnpm --filter @rpa/web build",
+    "test": "pnpm --filter @rpa/web test && pnpm --filter @rpa/agent test",
+    "test:backend": "uv run --project apps/backend pytest apps/backend/tests"
   },
   "packageManager": "pnpm@10.15.1"
 }

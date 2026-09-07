@@ -30,6 +30,8 @@ import RunsPage from "./pages/RunsPage";
 import RunDetail from "./pages/RunDetail";
 import RobotsPage from "./pages/RobotsPage";
 import SettingsPage from "./pages/SettingsPage";
+import LiveConsole from "./live/LiveConsole";
+import { LIVE } from "./live/api";
 const nav = [
   { path: "/", label: "工作总览", icon: <DashboardOutlined /> },
   { path: "/applications", label: "应用中心", icon: <AppstoreOutlined /> },
@@ -40,6 +42,9 @@ const nav = [
   { path: "/settings", label: "管理设置", icon: <SettingOutlined /> },
 ];
 export default function App() {
+  return LIVE ? <LiveConsole /> : <DemoApp />;
+}
+function DemoApp() {
   const { member, setMember } = useStore();
   const location = useLocation();
   const current = nav.find((n) =>

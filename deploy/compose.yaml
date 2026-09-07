@@ -1,0 +1,65 @@
+name: rpa-console
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: rpa
+      POSTGRES_USER: rpa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U rpa -d rpa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?required}
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:?required}
+      PUBLIC_URL: ${PUBLIC_URL:?required}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:?required}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?required}
+      FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?required}
+      ADMIN_OPEN_IDS: ${ADMIN_OPEN_IDS:?required}
+      EVIDENCE_DIR: /data/evidence
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+    volumes: [evidence:/data/evidence]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.node
+      target: agent
+    environment:
+      BACKEND_URL: http://backend:8000
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:?required}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?required}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash-vision-exp}
+      PI_SESSION_DIR: /data/sessions
+    volumes: [sessions:/data/sessions]
+    depends_on: [backend]
+    restart: unless-stopped
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.node
+      target: web
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?required}
+    ports: ["${HTTPS_PORT:-443}:443"]
+    volumes:
+      - ${TLS_DIRECTORY:?required}:/certs:ro
+      - caddy:/data
+    depends_on: [backend]
+    restart: unless-stopped
+volumes:
+  postgres:
+  evidence:
+  sessions:
+  caddy:

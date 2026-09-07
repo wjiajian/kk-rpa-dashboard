@@ -1,0 +1,6 @@
+{
+  "name": "@rpa/agent", "private": true, "version": "0.1.0", "type": "module",
+  "scripts": {"build": "tsc", "start": "node dist/main.js", "test": "node --import tsx --test src/*.test.ts"},
+  "dependencies": {"@earendil-works/pi-coding-agent": "0.85.1", "@earendil-works/pi-ai": "0.85.1", "typebox": "1.3.7"},
+  "devDependencies": {"@types/node": "^24.0.0", "typescript": "~5.8.3", "tsx": "^4.20.0"}
+}

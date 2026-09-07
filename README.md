@@ -1,8 +1,20 @@
 # KK RPA 控制台
 
-基于 `docs/rpa-console-frontend.md` 的第一版前端演示。React 18、TypeScript、Vite、Ant Design 5、RJSF。
+RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行控制后端、独立 pi Agent 服务和 macOS Docker 部署配置。Windows 执行端与核心接入扩展位于同级 `kk-rpa-monorepo`。
+
+失败接管的实现、配置与验收状态见 [接管实施说明](docs/recovery-implementation.md)，原规格见 [Dashboard RPA 失败接管](workflows/dashboard-rpa-recovery.md)。代码与离线接口已验证；Windows 真实业务、飞书登录与 DeepSeek 官方模型的现场验收尚未进行。
+
+## 真实运行模式
+
+按 [部署配置](deploy/.env.example) 准备私有环境变量、飞书登录和 TLS 证书，使用 [Compose](deploy/compose.yaml) 构建服务。生产镜像启用真实模式，提供运行列表/详情、运行发起与重跑、机器人凭据管理、SSE 事件、证据和停止请求。
+
+本地前端使用 `VITE_RUNTIME=live pnpm dev`，通过 `/api` 连接 8000 端口的后端。真实模式不会在接口失败时退回演示状态。应用导入、任务编辑与定时等其余页面仍属于下文的演示模式。
+
+开发验证：`pnpm build`、`pnpm test`、`pnpm test:backend`。后端使用 `uv sync --project apps/backend` 安装锁定依赖。
 
 ## 本地运行
+
+不设置 `VITE_RUNTIME=live` 时，保留原有前端演示：
 
 ```sh
 pnpm install
@@ -11,7 +23,7 @@ pnpm dev
 
 访问 http://127.0.0.1:5173。构建：`pnpm build`；测试：`pnpm test`。
 
-## 已实现
+## 演示页面
 
 - 工作总览、应用列表与版本详情、四步模拟导入。
 - 任务创建/编辑、日期绑定、凭据已配置状态、Cron 五次触发预览、启停定时。
@@ -25,7 +37,7 @@ pnpm dev
 
 Git/ZIP 导入不会拉取仓库、读取归档或上传文件；模拟运行只加入队列，不执行真实任务或自动推进状态。日志为静态样例；失败截图显示明确的缺失说明。相对日期暂不解析，等待后端创建运行时处理。
 
-飞书登录、后端权限、API/OpenAPI 客户端、TanStack Query 数据层、SSE、真实调度、部署和机器人连接尚未接入。Vite 已预留 `/api` 到 `http://127.0.0.1:8000` 的同源开发代理。
+演示模式不连接后端或机器人；运行相关的飞书登录、权限、SSE 和机器人连接通过上文的真实运行模式提供。真实调度与应用导入仍待接入。Vite 使用 `/api` 到 `http://127.0.0.1:8000` 的同源开发代理。
 
 ## 目录
 

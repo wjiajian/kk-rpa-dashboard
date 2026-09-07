@@ -3,3 +3,10 @@ dist/
 *.local
 .DS_Store
 *.tsbuildinfo
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+*.db
+*.sqlite*
+data/
