@@ -43,7 +43,11 @@ Agent 服务在内部网络轮询后端的接管工作，领取 30 秒可续期�
 
 只有 `context / observe / act / credential / resume / give_up` 六个模型工具。关闭内置工具、扩展、skills、prompt、主题和上下文文件发现。页面数据和历史对话不能扩大工具范围。SDK 与执行端均串行执行；同轮动作失败后的剩余调用被拒绝，下一轮先观察。
 
-DOM 观察返回实际节点的 XPath、可见文本和限定属性，临时目标只保存在当前恢复上下文。提交的定位器必须有当前 DOM 观察依据，并经过原 `override_element_locators` 字段检查。原 `expect_count`、`check_at`、应用代码和 `verify` 不变。下载文件名沿用原 `export_filename`。
+`context` 默认读取失败步骤的完整输入、输出和成功条件、相关元素，以及原运行参数和已完成结果；需求总览保留，历史验收和长诊断按需读取。`context(step="S005")` 可读取其他步骤，`context(full=true)` 可读取完整需求、元素和诊断。内容直接从应用原 `requirement.md` 和 `elements.toml` 提取；无法识别步骤标题时返回全文。
+
+DOM 观察在执行端保留实际节点的 XPath、可见文本和限定属性；模型默认接收 target、精简文本和非空属性。需要提交定位器修正时，用 `observe(target=目标, include_locators=true)` 获取实际路径，局部观察包含目标自身。预览截断会明确标记，精确文本通过 `act(read)` 回读。临时目标只保存在当前恢复上下文。提交的定位器必须有当前 DOM 观察依据，并经过原 `override_element_locators` 字段检查。原 `expect_count`、`check_at`、应用代码和 `verify` 不变。下载文件名沿用原 `export_filename`。
+
+每次模型请求只携带最近两次成功观察、其中最新一张截图和最近一次上下文；更早的结果用简短提示替代，保留工具调用配对、动作结果和错误。完整观察仍保存在运行记录及 pi 工具详情中。普通接管请求默认显式设置 `reasoning.effort=none`，单次输出上限为 4096 token；需要额外推理时可配置 `DEEPSEEK_REASONING_EFFORT=low`。`none` 按 [DeepSeek Responses 参数定义](https://api-docs.deepseek.com/api/create-response/) 关闭推理，不能用省略参数代替。会话恢复后也应用当前配置。`resume` 或 `give_up` 被接受后立即停止模型循环，最终总结使用工具中的 `summary`，不再追加一次模型总结请求。
 
 观察时不把空 XPath 注册为目标，iframe 只提供框架定位信息，再用返回的 target 观察框架内部；文本直接读取 DOM 的 innerText。观察失败保留截图，工具诊断记录错误类型、阶段和代码位置；控制台只展示简短错误类型或目标无效提示，不展示 DOM。浏览器新建或接续后先最大化窗口，再执行步骤。
 
@@ -99,6 +103,8 @@ DOM 观察返回实际节点的 XPath、可见文本和限定属性，临时目�
 | 简化部署后的 Compose 配置、Web 镜像重建与 Caddy 配置检查 | 通过 |
 | 飞书真实企业登录 | 尚未执行 |
 | DeepSeek 官方视觉与 Windows 真实接管 | 尚未执行 |
+
+2026-09-07 Token 优化验证：核心 183 项、执行桥 24 项、两个应用 44 项、Agent 12 项离线测试通过，Agent TypeScript 构建与 Compose 配置检查通过。实际 SDK 流式测试覆盖多次观察后仅发送最新两次文本和一张截图、显式关闭推理、截断后继续、交接后停止请求以及恢复会话时重新应用配置。最近一次运行记录的离线文本回放中，首次步骤上下文由 18,600 降至 5,181 字符，整页观察由 62,592 降至 24,685 字符，保留全部 175 个可操作目标；这是文本体积对比，实际 Token 和费用需由真实运行用量确认。
 
 重跑验证：
 

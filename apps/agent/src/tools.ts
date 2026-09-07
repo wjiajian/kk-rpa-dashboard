@@ -1,5 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
+import { compactObservation } from "./context.js";
 
 export type Reply = { status: string; result: Record<string, unknown> & { image?: { data: string; mimeType: string } } };
 export type Invoke = (id: string, action: string, params: Record<string, unknown>, signal?: AbortSignal) => Promise<Reply>;
@@ -44,17 +45,21 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
         const reply = await invoke(id, name, params as Record<string, unknown>, signal);
         const { image, ...result } = reply.result;
         if (reply.status !== "succeeded" || result.observation_error) throw new Error(JSON.stringify(result));
+        const visible = name === "observe" ? compactObservation(result, Boolean((params as Record<string, unknown>).include_locators)) : result;
         return { content: [
-          { type: "text" as const, text: JSON.stringify(result) },
+          { type: "text" as const, text: JSON.stringify(visible) },
           ...(image ? [{ type: "image" as const, data: image.data, mimeType: image.mimeType }] : []),
         ], details: result };
       });
     },
   });
   return [
-    tool("context", "读取本次恢复的原输入、成功输出、失败记录、步骤要求及正式元素；不读取任意文件。", object({})),
-    tool("observe", "观察可见 DOM 和截图。返回的 target 可用于临时操作；iframe 使用 frame_target 继续观察。", object({
+    tool("context", "默认读取失败步骤的完整契约、元素及原参数。step 指定其他步骤；full=true 读取全文和完整诊断。", object({
+      step: optionalText, full: Type.Optional(Type.Boolean()),
+    })),
+    tool("observe", "观察页面、截图和精简文本。操作只使用 target（不能传选择器）；iframe 使用 frame_target。修正定位器前指定目标和 include_locators=true。", object({
       target: optionalText, frame_target: optionalText, limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+      include_locators: Type.Optional(Type.Boolean()),
     })),
     tool("act", "操作原业务页面。target 仅接受正式元素 ID 或 observe 返回的 target；值必须遵循原输入与步骤要求。", object({
       operation: Type.Union(["navigate", "click", "new_tab", "input", "select", "read", "wait", "download"].map(v => Type.Literal(v))),

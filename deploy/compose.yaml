@@ -28,6 +28,7 @@ services:
       AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:?required}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?required}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash-vision-exp}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-none}
       PI_SESSION_DIR: /data/sessions
     volumes: [sessions:/data/sessions]
     depends_on: [backend]

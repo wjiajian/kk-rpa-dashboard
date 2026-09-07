@@ -20,6 +20,7 @@
 | --- | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | 官方模型调用 Key | 待填写 | 独立填写 |
 | `DEEPSEEK_MODEL` | Agent 模型名 | 已填默认值 | 示例默认值，按可用模型确认 |
+| `DEEPSEEK_REASONING_EFFORT` | 普通接管请求推理档位：`none` / `low` | 默认 `none`，降低推理消耗 | 默认 `none`，复杂恢复可配置 `low` |
 | `FEISHU_APP_ID` | 企业自建应用 ID | 待填写 | 填写实际应用 |
 | `FEISHU_APP_SECRET` | 应用 Secret | 待填写 | 填写实际应用 |
 | `FEISHU_TENANT_KEY` | 允许登录的企业 | 待填写 | 填写实际企业 |
