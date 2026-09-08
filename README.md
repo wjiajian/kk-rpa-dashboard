@@ -2,6 +2,8 @@
 
 RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行控制后端、独立 pi Agent 服务和 Docker Compose 部署配置。实际服务端为 Linux，Mac 仅作为开发测试服务端。Windows 执行端与核心接入扩展位于同级 `kk-rpa-monorepo`。
 
+分享交流文档见 [技术分享导读](docs/sharing/README.md)，包含 [Monorepo 技术说明](docs/sharing/monorepo.md) 和 [Dashboard 技术说明](docs/sharing/dashboard.md)：框架、技术选型、设计思路、实现进度与待完成内容。
+
 失败接管的实现、配置与验收状态见 [接管实施说明](docs/recovery-implementation.md)，原规格见 [Dashboard RPA 失败接管](workflows/dashboard-rpa-recovery.md)。代码与离线接口已验证；Windows 真实业务、飞书登录与 DeepSeek 官方模型的现场验收尚未进行。
 
 ## 真实运行模式
