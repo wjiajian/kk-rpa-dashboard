@@ -18,6 +18,7 @@ import { Link } from "react-router-dom";
 import { useStore } from "../mock/store";
 import { today, type Application } from "../mock/data";
 import { PageTitle, Panel } from "../components/shared";
+import { parameterDefaults, reportSchema } from "../form/parameters";
 import { SchemaForm } from "../form/SchemaForm";
 export default function ImportWizard() {
   const { setApps } = useStore();
@@ -32,6 +33,7 @@ export default function ImportWizard() {
   const candidates: Application[] = [
     {
       id: "demo-sales",
+      inputSchema: reportSchema,
       name: "销售日报汇总",
       description: "按门店汇总每日销售指标。",
       tags: ["经营报表", "数据汇总"],
@@ -175,7 +177,8 @@ export default function ImportWizard() {
                     a.valid ? (
                       <SchemaForm
                         readonly
-                        data={{ brand: "全部品牌", filename: "report.xlsx" }}
+                        schema={a.inputSchema}
+                        data={parameterDefaults(a.inputSchema)}
                       />
                     ) : (
                       <Alert

@@ -8,10 +8,12 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { useStore } from "../mock/store";
 import { type Task, type Run, time } from "../mock/data";
+import { taskParameters } from "../form/parameters";
+import { robots } from "../mock/data";
 import { nextDates } from "../schedule/cron";
 import { PageTitle, Panel } from "../components/shared";
 export function useTrigger() {
-  const { setRuns } = useStore();
+  const { setRuns, apps } = useStore();
   const { modal, message } = App.useApp();
   const navigate = useNavigate();
   return (task: Task) =>
@@ -28,14 +30,9 @@ export function useTrigger() {
           appId: task.appId,
           version: task.version,
           robot: task.robot,
-          params: {
-            target_date:
-              task.date.kind === "fixed"
-                ? task.date.value
-                : "待执行端解析（演示）",
-            brand: task.brand,
-            export_filename: task.filename,
-          },
+          params: Object.fromEntries(Object.entries(apps.find(a => a.id === task.appId)?.inputSchema ? taskParameters(task, apps.find(a => a.id === task.appId)!.inputSchema!) : {}).map(([key, value]) => [key,
+            value && typeof value === "object" && "kind" in value ? (value.kind === "fixed" && "value" in value ? String(value.value) : "待执行端解析（演示）") : typeof value === "object" ? JSON.stringify(value) : String(value ?? "")
+          ])),
           status: "排队中",
           source: "手动",
           created: new Date().toISOString(),
@@ -53,15 +50,17 @@ export default function TasksPage() {
   const trigger = useTrigger();
   const [search, setSearch] = useState("");
   const [app, setApp] = useState<string>();
+  const [enabled, setEnabled] = useState<boolean>();
+  const [robot, setRobot] = useState<string>();
   return (
-    <>
+    <div className="task-plans">
       <PageTitle
-        title="任务管理"
-        description="为应用配置业务参数、执行机器人和定时计划。"
+        title="常规任务计划"
+        description="管理应用的执行参数与定时安排。"
         actions={
           <Link to="/tasks/new">
             <Button type="primary" icon={<PlusOutlined />}>
-              创建任务
+              新建常规任务
             </Button>
           </Link>
         }
@@ -82,15 +81,16 @@ export default function TasksPage() {
             onChange={setApp}
             options={apps.map((a) => ({ label: a.name, value: a.id }))}
           />
-          <span className="muted">共 {tasks.length} 个任务</span>
+          <Select aria-label="启用状态" placeholder="全部状态" allowClear value={enabled} onChange={setEnabled} options={[{ label: "已启用", value: true }, { label: "未启用", value: false }]} />
+          <Select aria-label="执行机器人" placeholder="全部机器人" allowClear value={robot} onChange={setRobot} options={robots.map(r => ({ label: r.name, value: r.id }))} />
         </div>
         <Table
           rowKey="id"
           scroll={{ x: 1050 }}
           dataSource={tasks.filter(
-            (t) => t.name.includes(search) && (!app || t.appId === app),
+            (t) => t.name.includes(search) && (!app || t.appId === app) && (enabled === undefined || t.enabled === enabled) && (!robot || t.robot === robot),
           )}
-          pagination={{ pageSize: 8, showTotal: (n) => `共 ${n} 项` }}
+          pagination={{ defaultPageSize: 10, showSizeChanger: true, showTotal: (n) => `共 ${n} 条` }}
           columns={[
             {
               title: "任务名称",
@@ -110,19 +110,18 @@ export default function TasksPage() {
                 </>
               ),
             },
-            { title: "机器人", dataIndex: "robot" },
+            { title: "执行机器人", render: (_, t) => robots.find(r => r.id === t.robot)?.name || t.robot },
             {
-              title: "定时计划",
-              dataIndex: "cron",
-              render: (c) => <code>{c}</code>,
+              title: "触发方式",
+              render: (_, t) => t.enabled ? "计划触发" : "手动触发",
             },
             {
-              title: "下次触发",
+              title: "执行时间",
               render: (_, t) =>
-                t.enabled ? time(nextDates(t.cron)[0], "MM-DD HH:mm") : "—",
+                t.enabled ? time(nextDates(t.cron)[0], "YYYY-MM-DD HH:mm:ss") : "—",
             },
             {
-              title: "定时启用",
+              title: "启用状态",
               render: (_, t) => (
                 <Switch
                   aria-label={`${t.name}定时启用`}
@@ -133,9 +132,11 @@ export default function TasksPage() {
             },
             {
               title: "操作",
+              fixed: "right",
+              width: 235,
               render: (_, t) => (
                 <Space>
-                  <Link to={`/tasks/${t.id}/edit`}>编辑</Link>
+                  <Link to={`/tasks/${t.id}/edit`}>编辑</Link><Link to={`/runs?task=${t.id}`}>记录</Link>
                   <Button
                     type="link"
                     icon={<PlayCircleOutlined />}
@@ -149,6 +150,6 @@ export default function TasksPage() {
           ]}
         />
       </Panel>
-    </>
+    </div>
   );
 }

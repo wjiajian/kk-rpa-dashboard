@@ -59,10 +59,10 @@ class Snapshot(StrictModel):
 class BusinessCredentials(StrictModel):
     username: SecretStr = Field(min_length=1, max_length=1024)
     password: SecretStr = Field(min_length=1, max_length=4096)
-    expected_identity: SecretStr = Field(min_length=1, max_length=1024)
+    expected_identity: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
 
     def plaintext(self):
-        return {field: getattr(self, field).get_secret_value() for field in type(self).model_fields}
+        return {field: getattr(self, field).get_secret_value() for field in type(self).model_fields if getattr(self, field) is not None}
 
 
 class NewRun(StrictModel):

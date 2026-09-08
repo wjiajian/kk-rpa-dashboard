@@ -1,7 +1,7 @@
 import Form from "@rjsf/antd";
 import validator from "@rjsf/validator-ajv8";
 import type { RJSFSchema } from "@rjsf/utils";
-const schema: RJSFSchema = {
+const legacySchema: RJSFSchema = {
   type: "object",
   required: ["brand", "filename"],
   properties: {
@@ -22,11 +22,13 @@ const schema: RJSFSchema = {
 };
 export function SchemaForm({
   data,
+  schema = legacySchema,
   onChange,
   readonly = false,
 }: {
-  data: { brand: string; filename: string };
-  onChange?: (v: { brand: string; filename: string }) => void;
+  schema?: RJSFSchema;
+  data: Record<string, unknown>;
+  onChange?: (v: Record<string, unknown>) => void;
   readonly?: boolean;
 }) {
   return (

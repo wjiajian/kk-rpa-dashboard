@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { useStore } from "../mock/store";
 import { PageTitle, Panel, NotFound } from "../components/shared";
 import { ApplicationTagEditor } from "../components/ApplicationTagEditor";
+import { parameterDefaults } from "../form/parameters";
 import { SchemaForm } from "../form/SchemaForm";
 export default function ApplicationsPage() {
   const { apps, tasks } = useStore();
@@ -220,11 +221,10 @@ export function ApplicationDetail() {
               />
               <SchemaForm
                 readonly
-                data={{ brand: "全部品牌", filename: "report.xlsx" }}
+                schema={app.inputSchema}
+                data={parameterDefaults(app.inputSchema)}
               />
-              <Space>
-                业务日期<Tag>固定日期 / 相对日期</Tag>
-              </Space>
+
             </>
           ) : (
             <Alert

@@ -7,7 +7,6 @@ COPY apps/agent/package.json apps/agent/package.json
 RUN pnpm install --frozen-lockfile
 COPY apps/web apps/web
 COPY apps/agent apps/agent
-ENV VITE_RUNTIME=live
 RUN pnpm build
 
 FROM node:24-bookworm-slim AS agent

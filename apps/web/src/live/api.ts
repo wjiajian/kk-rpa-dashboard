@@ -1,4 +1,4 @@
-export const LIVE = import.meta.env.VITE_RUNTIME === "live";
+import type { RJSFSchema } from "@rjsf/utils";
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, { credentials: "same-origin",
     ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
@@ -24,4 +24,4 @@ export interface RunRecord {
   token_usage?: { input: number; output: number; cache_read: number; cache_write: number; total: number; requests: number; unreported_responses: number };
 }
 export interface RunEvent { seq: number; kind: string; message: string; at: number; details?: Record<string, unknown> }
-export interface RobotRecord { id: string; name: string; active_run?: string; online: boolean; revoked: boolean; deployments: { app_id: string; version: string }[] }
+export interface RobotRecord { id: string; name: string; active_run?: string; online: boolean; revoked: boolean; deployments: { app_id: string; version: string; input_schema?: RJSFSchema; form_schema?: RJSFSchema }[] }

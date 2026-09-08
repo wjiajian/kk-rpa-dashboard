@@ -5,7 +5,6 @@ import { ConfigProvider, App as AntApp } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import "dayjs/locale/zh-cn";
 import dayjs from "dayjs";
-import { StoreProvider } from "./mock/store";
 import App from "./App";
 import "./styles.css";
 dayjs.locale("zh-cn");
@@ -15,43 +14,44 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       locale={zhCN}
       theme={{
         token: {
-          colorPrimary: "#a8ce98",
-          colorPrimaryHover: "#b9d9aa",
-          colorPrimaryActive: "#91ba80",
-          colorLink: "#477044",
-          colorLinkHover: "#345b32",
-          colorTextLightSolid: "#294329",
-          colorBgLayout: "#f4f3ed",
-          colorBgContainer: "#fffef8",
-          colorBgElevated: "#fffef8",
-          colorInfo: "#769866",
-          controlItemBgActive: "#e7f0dc",
-          colorText: "#303d30",
-          colorTextSecondary: "#798471",
-          colorBorder: "#dce2d1",
+          colorPrimary: "#ff4d55",
+          colorPrimaryHover: "#ff7076",
+          colorPrimaryActive: "#e83d46",
+          colorLink: "#3276ff",
+          colorLinkHover: "#245bdb",
+          colorTextLightSolid: "#ffffff",
+          colorBgLayout: "#f5f6fa",
+          colorBgContainer: "#ffffff",
+          colorBgElevated: "#ffffff",
+          colorInfo: "#3276ff",
+          controlItemBgActive: "#edf3ff",
+          colorText: "#242833",
+          colorTextSecondary: "#8b92a3",
+          colorBorder: "#dcdfe6",
           borderRadius: 7,
           fontFamily:
             '"PingFang SC", "Microsoft YaHei", -apple-system, sans-serif',
-          fontSize: 13,
-          controlHeight: 36,
+          fontSize: 14,
+          controlHeight: 38,
         },
         components: {
+          Switch: { colorPrimary: "#3276ff", colorPrimaryHover: "#528cff" },
+          Input: { activeBorderColor: "#3276ff", hoverBorderColor: "#6e9fff" },
+          Select: { activeBorderColor: "#3276ff", hoverBorderColor: "#6e9fff" },
           Table: {
-            headerBg: "#f3f5e9",
-            headerColor: "#74816a",
-            rowHoverBg: "#f0f5e7",
+            headerBg: "#f6f7fc",
+            headerColor: "#515b70",
+            rowHoverBg: "#fafbff",
             cellPaddingBlock: 17,
           },
-          Button: { primaryShadow: "none", primaryColor: "#294329" },
-          Tag: { defaultBg: "#edf1e4" },
+          Button: { primaryShadow: "none", primaryColor: "#ffffff" },
+          Tag: { defaultBg: "#f3f5fa" },
         },
       }}
     >
       <AntApp>
         <BrowserRouter>
-          <StoreProvider>
-            <App />
-          </StoreProvider>
+          <App />
         </BrowserRouter>
       </AntApp>
     </ConfigProvider>

@@ -27,6 +27,7 @@ export default function RunsPage({ business = false }: { business?: boolean }) {
     .filter(
       (r) =>
         (!status || r.status === status) &&
+        (!params.get("task") || r.taskId === params.get("task")) &&
         r.name.includes(search) &&
         (!range ||
           (time(r.created, "YYYY-MM-DD") >= range[0] &&
@@ -61,7 +62,7 @@ export default function RunsPage({ business = false }: { business?: boolean }) {
             allowClear
             value={status}
             options={statuses.map((s) => ({ label: s, value: s }))}
-            onChange={(s) => setParams(s ? { status: s } : {})}
+            onChange={(s) => setParams(old => { const next = new URLSearchParams(old); if (s) next.set("status", s); else next.delete("status"); return next; })}
           />
           <DatePicker.RangePicker
             onChange={(_, values) =>

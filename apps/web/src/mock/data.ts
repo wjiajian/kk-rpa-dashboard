@@ -1,3 +1,5 @@
+import type { RJSFSchema } from "@rjsf/utils";
+import { reportSchema, reconcileSchema, inventorySchema } from "../form/parameters";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
@@ -21,6 +23,7 @@ export type Binding =
   | { kind: "fixed"; value: string }
   | { kind: "relative_date"; offset_days: number };
 export interface Application {
+  inputSchema?: RJSFSchema;
   id: string;
   name: string;
   description: string;
@@ -31,6 +34,9 @@ export interface Application {
   imported: string;
 }
 export interface Task {
+  username?: string;
+  expectedIdentity?: string;
+  parameters?: Record<string, unknown>;
   id: string;
   name: string;
   appId: string;
@@ -62,6 +68,7 @@ export interface Run {
 export const applications: Application[] = [
   {
     id: "product-report",
+    inputSchema: reportSchema,
     name: "商品明细报表",
     description: "自动采集商品销售明细，生成每日经营报表。",
     version: "1.3.0",
@@ -72,6 +79,7 @@ export const applications: Application[] = [
   },
   {
     id: "order-reconcile",
+    inputSchema: reconcileSchema,
     name: "订单对账",
     description: "核对平台订单与结算数据，定位差异记录。",
     version: "2.1.0",
@@ -82,6 +90,7 @@ export const applications: Application[] = [
   },
   {
     id: "inventory-sync",
+    inputSchema: inventorySchema,
     name: "库存数据同步",
     description: "同步各门店库存快照，汇总库存变动。",
     version: "1.0.2",

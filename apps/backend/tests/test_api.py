@@ -14,7 +14,7 @@ from rpa_console.api import Config, create_app
 from rpa_console.storage import Base, Database, Evidence, LoginSession, Run, RunCredential, Operation, Event
 from sqlalchemy import select
 
-CREDENTIALS = {"username": "test-business-login", "password": "test-private-password-938!", "expected_identity": "test-visible-identity"}
+CREDENTIALS = {"username": "test-business-login", "password": "test-private-password-938!"}
 
 
 @pytest.fixture

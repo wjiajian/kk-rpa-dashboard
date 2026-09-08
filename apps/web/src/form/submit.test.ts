@@ -14,8 +14,10 @@ it("沿用凭据时省略字段，日期绑定保留原结构", () => {
   });
 });
 it("只装配显式新密码", () => {
-  expect(assembleTask(tasks[0], "test-only").credentials).toEqual({
+  expect(assembleTask({ ...tasks[0], username: "test-user", expectedIdentity: "test-shop" }, "test-only").credentials).toEqual({
+    username: "test-user",
     password: "test-only",
+    expected_identity: "test-shop",
   });
 });
 it("业务必填项、文件名和日期偏移校验", () => {
