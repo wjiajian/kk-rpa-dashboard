@@ -29,3 +29,13 @@ test("cancellation and ordinary model failures do not trigger another prompt", a
     assert.equal(calls, 1);
   }
 });
+
+test("three consecutive truncated responses terminate with a specific reason", async () => {
+  let calls = 0;
+  const active = { gate: { finished: false }, session: {
+    sessionManager: { getEntries: () => [{ type: "message", message: { role: "assistant", stopReason: "length" } }] },
+    prompt: async () => { calls++; },
+  } } as unknown as Awaited<ReturnType<typeof makeSession>>;
+  await assert.rejects(promptRecovery(active, "处理现场", new AbortController().signal), /repeated_response_truncation/);
+  assert.equal(calls, 3);
+});

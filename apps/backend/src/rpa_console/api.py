@@ -93,6 +93,7 @@ class UsageReport(StrictModel):
     cache_write: int = Field(ge=0)
     requests: int = Field(ge=0)
     unreported_responses: int = Field(ge=0)
+    model_ms: float = Field(default=0, ge=0, allow_inf_nan=False)
 
 
 def create_app(config=None, database=None):
@@ -484,13 +485,14 @@ def create_app(config=None, database=None):
                 totals = {key: sum(item[key] for item in sessions.values()) for key in fields}
                 totals["total"] = sum(totals[key] for key in ("input", "output", "cache_read", "cache_write"))
                 data["token_usage"] = totals
+                data["recovery_timings"] = {"model_ms": sum(item.get("model_ms", 0) for item in sessions.values())}
                 run.data = data
         return {"recorded": True}
 
     @app.post("/internal/runs/{run_id}/agent-failed", dependencies=[Depends(internal)])
     def agent_failed(run_id: str, body: dict):
         if control.agent_state(run_id, body["lease"])["active"]:
-            control.request_stop(run_id, "agent_unavailable")
+            control.request_stop(run_id, body.get("reason") if body.get("reason") in {"request_budget_exhausted", "token_budget_exhausted", "repeated_response_truncation", "recovery_protocol_unsupported"} else "agent_unavailable")
         return {"recorded": True}
 
     return app

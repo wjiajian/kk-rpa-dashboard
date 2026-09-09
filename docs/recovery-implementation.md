@@ -2,6 +2,10 @@
 
 实现基线：[dashboard-rpa-recovery.md](../workflows/dashboard-rpa-recovery.md)。本次提供代码与离线验证；真实业务验收必须单独记录，不能用下列测试结果代替 Windows + DeepSeek 的验收。
 
+## 2026-09-09 接管协议更新
+
+当前实现已升级为协议 2，具体接口与离线/真实验收边界见 [Agent 接管改进实施记录](agent-recovery-improvement.md#九实施记录2026-09-09)。新增 query，活引用保存在 core；observe 按字段读取且截图按需；act 返回等待和回读事实。八次观察硬退出已删除。旧 Windows core 的能力上报不匹配时停止接管，需更新实际应用环境。下文保留原流程与部署背景，其中旧 XPath 临时目标、固定截图和无界截断续写描述由新版记录替代。
+
 ## 代码位置
 
 | 位置 | 职责 |

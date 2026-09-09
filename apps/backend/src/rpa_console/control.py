@@ -2,6 +2,7 @@
 from copy import deepcopy
 from hashlib import sha256
 import hmac
+import os
 import secrets
 from time import time
 
@@ -10,7 +11,7 @@ from sqlalchemy import select
 from .storage import Event, Operation, Robot, Run, uid
 
 TERMINAL = {"succeeded", "failed", "stopped", "cancelled"}
-TOOLS = {"context", "observe", "act", "credential", "resume", "give_up"}
+TOOLS = {"context", "query", "observe", "act", "credential", "resume", "give_up"}
 PENDING = {"accepted", "running", "unknown"}
 BUDGET = 900.0
 MAX_RECOVERY_ROUNDS = 3
@@ -35,6 +36,10 @@ def pause_budget(data, at):
 class Control:
     def __init__(self, database, clock=time, credentials=None):
         self.db, self.clock = database, clock
+        self.max_requests = int(os.environ.get("RECOVERY_MAX_REQUESTS", "0"))
+        self.max_tokens = int(os.environ.get("RECOVERY_MAX_TOKENS", "0"))
+        if min(self.max_requests, self.max_tokens) < 0:
+            raise ValueError("recovery budgets must be non-negative")
         self.credentials = credentials
 
     def add_robot(self, name):
@@ -62,18 +67,18 @@ class Control:
         action = body["action"]
         if action not in TOOLS:
             return
-        label = {"context": "读取运行上下文", "observe": "观察页面", "credential": "填写登录凭据",
+        label = {"context": "读取运行上下文", "observe": "观察页面", "query": "查询页面目标", "credential": "填写登录凭据",
                  "resume": "提交程序续跑", "give_up": "结束接管"}.get(action)
         if action == "act":
             label = {"navigate": "打开业务页面", "click": "点击页面控件", "new_tab": "打开新页签",
                      "input": "填写页面内容", "select": "选择业务条件", "read": "读取页面状态",
                      "wait": "等待页面就绪", "download": "下载报表"}.get(body["params"].get("operation"), "操作业务页面")
         result = operation.get("result") or {}
-        if result.get("observation_error"):
+        if result.get("observation_error") or result.get("error"):
             status = "failed"
         state = {"running": "执行中", "succeeded": "已完成", "failed": "失败，等待处理", "unknown": "结果待确认"}[status]
         if result.get("observation_error"):
-            error_type = str(result["observation_error"])
+            error_type = str(result.get("observation_error") or result.get("error_type") or "ActionError")
             error_type = error_type if error_type.isidentifier() and len(error_type) <= 80 else "未知异常"
             state = f"页面读取失败（{error_type}）"
             if result.get("observation_stage") == "target":
@@ -93,6 +98,10 @@ class Control:
                 "rounds_exhausted": "已达到 3 轮接管上限，结束接管并等待执行端收尾。",
                 "administrator": "管理员已请求停止，本轮接管结束。",
                 "agent_unavailable": "Agent 未能完成本轮接管，已请求停止。",
+                "request_budget_exhausted": "模型请求预算已耗尽，已请求停止。",
+                "token_budget_exhausted": "模型 Token 预算已耗尽，已请求停止。",
+                "repeated_response_truncation": "模型连续响应截断，已请求停止并保留最后事实。",
+                "recovery_protocol_unsupported": "Windows 实际加载的 core 不支持新版接管，请更新执行环境。",
                 "requires_administrator": "检测到人工验证，本轮接管结束，请管理员处理后重跑。",
             }.get(data.get("stop_reason"), "本轮接管中断，未提交可继续执行的恢复结果。")
         if self.credentials is not None:
@@ -214,6 +223,12 @@ class Control:
                       and (not d.get("lease") or d["lease"]["expires"] <= now)):
                     d["stop_reason"] = d["stop_reason"] or "rounds_exhausted"
                     d["lease"] = None
+                usage = d.get("token_usage", {})
+                if d["phase"] == "recovery":
+                    if self.max_requests and usage.get("requests", 0) >= self.max_requests:
+                        d["stop_reason"] = d["stop_reason"] or "request_budget_exhausted"
+                    if self.max_tokens and usage.get("total", 0) >= self.max_tokens:
+                        d["stop_reason"] = d["stop_reason"] or "token_budget_exhausted"
                 if d["stop_reason"]:
                     self.finish_round(s, run, d)
                     d["status"] = "stopping" if online else "uncertain"
@@ -364,8 +379,14 @@ class Control:
                 if kind == "recovery_started":
                     if d["phase"] != "opening":
                         raise Conflict("未请求打开恢复上下文")
+                    capabilities = payload.get("capabilities", {})
+                    d["recovery_capabilities"] = capabilities
+                    d["recovery_runtime"] = {key: payload.get(key) for key in ("core_version", "core_module")}
+                    if capabilities.get("protocol") != 2 or not {"live_refs", "query", "observe_fields", "act_expect_read", "scope_path"}.issubset(capabilities.get("features", [])):
+                        d["stop_reason"] = "recovery_protocol_unsupported"
+                        d["conclusion"] = {"reason": "Windows 实际加载的 core 不支持新版接管，请更新执行环境", "attempted": [], "evidence": [], "next_actions": ["更新 Windows 应用环境中的 rpa-core 与 Worker，核对 recovery_started 能力上报"]}
                     d.update(phase="recovery", status="recovering", recovery_since=at, lease=None)
-                    self.event(s, run, d, kind, "Agent 已实际接管，开始累计接管时间")
+                    self.event(s, run, d, kind, "执行端接管能力不匹配，请更新 Windows 应用环境" if d["stop_reason"] == "recovery_protocol_unsupported" else "Agent 已实际接管，开始累计接管时间", details=payload)
                 elif kind == "program_started":
                     if d["phase"] not in {"starting", "submitting"}:
                         raise Conflict("未分配本次程序执行")
@@ -439,7 +460,8 @@ class Control:
             run.data = d
             return {"console_run_id": run.id, "execution_attempt_id": d["attempt_id"],
                     "lease": d["lease"]["id"], "remaining_seconds": remaining(d, now),
-                    "recovery_round": len(rounds), "max_recovery_rounds": MAX_RECOVERY_ROUNDS}
+                    "recovery_round": len(rounds), "max_recovery_rounds": MAX_RECOVERY_ROUNDS,
+                    "capabilities": d.get("recovery_capabilities", {})}
 
     def agent_state(self, run_id, lease_id, renew=False):
         with self.db.transaction() as s:

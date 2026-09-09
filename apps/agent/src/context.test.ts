@@ -13,7 +13,7 @@ test("compact observation keeps actionable targets and full locators remain avai
   assert.equal(compactObservation(result, true).nodes[0].locator, result.nodes[0].locator);
   const observe = recoveryTools(async () => ({ status: "succeeded", result }), new ToolGate()).find(tool => tool.name === "observe")!;
   const reply = await observe.execute("id", {});
-  assert.deepEqual(reply.details, result);
+  assert.deepEqual({ ...reply.details, timings_ms: undefined }, { ...result, timings_ms: undefined });
   assert.ok(!JSON.stringify(reply.content).includes("xpath:/html"));
   assert.equal(result.nodes[0].attributes.name, null);
 });
@@ -43,4 +43,11 @@ test("history preserves calls and errors, keeps two observations and one image w
   assert.equal(outputs[3].content[0].type === "text" && outputs[3].content[0].text, "two");
   assert.equal(outputs[5].content[0].type === "text" && outputs[5].content[0].text, "three");
   assert.ok(outputs[1].content[0].type === "text" && outputs[1].content[0].text.includes("历史页面观察"));
+});
+
+test("frame targets survive compaction without exposing unsolicited locators", () => {
+  const result = { nodes: [], frames: [{ target: "frame-one", tag: "iframe", locator: "xpath:/iframe", attributes: { name: "stock" } }] };
+  const compact = compactObservation(result);
+  assert.deepEqual(compact.frames, [{ target: "frame-one", tag: "iframe", attributes: { name: "stock" } }]);
+  assert.equal(compactObservation(result, true).frames[0].locator, "xpath:/iframe");
 });

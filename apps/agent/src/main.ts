@@ -23,7 +23,7 @@ async function api(path: string, body?: unknown, signal?: AbortSignal) {
   return response.json();
 }
 
-type Job = { console_run_id: string; execution_attempt_id: string; lease: string; remaining_seconds: number; recovery_round: number; max_recovery_rounds: number };
+type Job = { console_run_id: string; execution_attempt_id: string; lease: string; remaining_seconds: number; recovery_round: number; max_recovery_rounds: number; capabilities: { protocol?: number; features?: string[] } };
 async function run(job: Job, abort: AbortController) {
   const path = `/internal/runs/${job.console_run_id}`;
   let activeSession: Awaited<ReturnType<typeof makeSession>> | undefined;
@@ -40,6 +40,7 @@ async function run(job: Job, abort: AbortController) {
     }
   })().catch(() => abort.abort());
   try {
+    if (job.capabilities?.protocol !== 2) throw new Error("recovery_protocol_unsupported");
     activeSession = await makeSession(job.console_run_id, root, key!, async (id, action, params, signal) => {
       const requestId = `${job.execution_attempt_id}:${id}`;
       const payload = { lease: job.lease, execution_attempt_id: job.execution_attempt_id, request_id: requestId, action, params };
@@ -60,9 +61,9 @@ async function run(job: Job, abort: AbortController) {
     if (!activeSession.gate.finished && !abort.signal.aborted) {
       await api(`${path}/agent-failed`, { lease: job.lease });
     }
-  } catch {
+  } catch (error) {
     // Cancellation never claims the robot stopped. Backend/executor confirm it.
-    if (!abort.signal.aborted) await api(`${path}/agent-failed`, { lease: job.lease }).catch(() => undefined);
+    if (!abort.signal.aborted) await api(`${path}/agent-failed`, { lease: job.lease, reason: error instanceof Error ? error.message : "agent_unavailable" }).catch(() => undefined);
   } finally {
     abort.abort();
     clearTimeout(timer);

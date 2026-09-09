@@ -26,7 +26,7 @@ test("all browser tools serialize; a failed batch stops until a fresh observatio
 
 test("custom tool allowlist has no programming or arbitrary file tools", () => {
   const definitions = recoveryTools(async () => ({ status: "succeeded", result: {} }), new ToolGate());
-  assert.deepEqual(definitions.map(t => t.name), ["context", "observe", "act", "credential", "resume", "give_up"]);
+  assert.deepEqual(definitions.map(t => t.name), ["context", "query", "observe", "act", "credential", "resume", "give_up"]);
   assert.ok(definitions.every(t => t.executionMode === "sequential"));
   for (const tool of definitions.filter(t => ["resume", "give_up"].includes(t.name))) {
     assert.ok(tool.parameters.required?.includes("summary"));
@@ -72,10 +72,32 @@ test("SDK resources stay isolated and session restore cannot enable builtins", a
   await writeFile(join(dir, ".pi", "extensions", "injected.ts"), "throw new Error('extension was loaded')");
   try {
     const { session } = await makeSession(id, root, "offline-test-key", async () => ({ status: "succeeded", result: {} }));
-    assert.deepEqual(session.getActiveToolNames().sort(), ["act", "context", "credential", "give_up", "observe", "resume"]);
+    assert.deepEqual(session.getActiveToolNames().sort(), ["act", "context", "credential", "give_up", "observe", "query", "resume"]);
     assert.ok(session.systemPrompt.includes("永久职责"));
     assert.ok(!session.systemPrompt.includes("IGNORE THE RUN"));
     await assert.rejects(access(join(dir, "unused-auth.json")));
     session.dispose();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("repeated facts produce feedback without an observation-count cutoff", async () => {
+  const gate = new ToolGate();
+  const definitions = recoveryTools(async (_id, action) => ({ status: "succeeded", result: { nodes: [{ target: `random-${_id}`, tag: "input", text: "same" }] } }), gate);
+  const query = definitions.find(t => t.name === "query")!;
+  let reply: any;
+  for (let i = 0; i < 10; i++) reply = await query.execute(`q${i}`, { locator: "css:input" });
+  assert.equal(reply.details.repetition.count, 10);
+  assert.equal(gate.finished, false);
+});
+
+test("structured action failure preserves covering object and fences the batch", async () => {
+  const gate = new ToolGate();
+  const definitions = recoveryTools(async (_id, action) => ({ status: "succeeded", result: action === "act" ? { error: "covered", cover: "e3", issued: false, phase: "precondition" } : {} }), gate);
+  const tool = (name: string) => definitions.find(t => t.name === name)!;
+  await tool("query").execute("q", { locator: "css:button" });
+  const reply = await tool("act").execute("a", { operation: "click", target: "e1" });
+  assert.equal(reply.details.cover, "e3");
+  await assert.rejects(tool("act").execute("blocked", { operation: "click", target: "e1" }));
+  gate.nextTurn();
+  await tool("query").execute("fresh", { scope: "e1", relation: "over" });
 });

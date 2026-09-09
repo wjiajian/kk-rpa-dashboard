@@ -10,7 +10,10 @@ import { streamSimple } from "@earendil-works/pi-ai/api/openai-responses";
 import { makeSession, promptRecovery } from "./session.js";
 import { sessionUsage } from "./usage.js";
 
-test("actual pi SDK uses economy parameters, continues truncation and stops immediately after handoff", async () => {
+for (const effort of ["none", "high"] as const) {
+test(`actual pi SDK uses ${effort} reasoning, continues truncation and stops after handoff`, async () => {
+  const previousEffort = process.env.DEEPSEEK_REASONING_EFFORT;
+  process.env.DEEPSEEK_REASONING_EFFORT = effort;
   const requests: Record<string, any>[] = [];
   const server = createServer(async (request, response) => {
     let body = "";
@@ -66,7 +69,7 @@ test("actual pi SDK uses economy parameters, continues truncation and stops imme
     assert.deepEqual(calls, ["context", "observe", "observe", "observe", "resume"]);
     assert.equal(active.gate.finished, true);
     assert.equal(requests.length, 5);
-    assert.ok(requests.every(request => request.reasoning.effort === "none" && request.max_output_tokens === 4096));
+    assert.ok(requests.every(request => request.reasoning.effort === effort && request.max_output_tokens === (effort === "high" ? 16384 : 4096)));
     const latestInput = JSON.stringify(requests[4].input);
     assert.ok(latestInput.includes("上一条模型响应达到输出上限"));
     assert.ok(!latestInput.includes("observation-1") && latestInput.includes("observation-2") && latestInput.includes("observation-3"));
@@ -74,22 +77,27 @@ test("actual pi SDK uses economy parameters, continues truncation and stops imme
     assert.ok(!latestInput.includes("xpath:/html/body/button"));
     assert.equal(sessionUsage(session.sessionManager).input, 50);
     assert.equal(sessionUsage(session.sessionManager).output, 50);
+    assert.ok(sessionUsage(session.sessionManager).model_ms > 0);
     assert.equal(requests[0].store, false);
     assert.equal(requests[1].previous_response_id, undefined);
     assert.ok(requests[1].input.some((item: any) => item.type === "function_call_output" && Array.isArray(item.output) && item.output.some((part: any) => part.type === "input_image")));
-    assert.deepEqual(requests[0].tools.map((tool: any) => tool.name).sort(), ["act", "context", "credential", "give_up", "observe", "resume"]);
+    assert.deepEqual(requests[0].tools.map((tool: any) => tool.name).sort(), ["act", "context", "credential", "give_up", "observe", "query", "resume"]);
     const persistedMessages = session.sessionManager.getEntries().filter(entry => entry.type === "message").map(entry => entry.id);
     session.setThinkingLevel("low");
     session.dispose();
     const restored = await makeSession(id, root, "offline-test-key", invoke);
-    assert.equal(restored.session.thinkingLevel, "off");
+    assert.equal(restored.session.thinkingLevel, effort === "none" ? "off" : "high");
     assert.deepEqual(restored.session.sessionManager.getEntries().filter(entry => entry.type === "message").map(entry => entry.id), persistedMessages);
     assert.equal(sessionUsage(restored.session.sessionManager).input, 50);
     restored.session.dispose();
   } finally {
     session.dispose();
+    if (previousEffort === undefined) delete process.env.DEEPSEEK_REASONING_EFFORT;
+    else process.env.DEEPSEEK_REASONING_EFFORT = previousEffort;
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });
+
+}

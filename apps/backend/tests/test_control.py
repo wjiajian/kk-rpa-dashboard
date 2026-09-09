@@ -46,7 +46,7 @@ class Harness:
         self.result(start)
         self.c.tick({self.robot})
         op = self.c.commands(self.robot)[0]
-        self.send("recovery_started")
+        self.send("recovery_started", {"capabilities": {"protocol": 2, "features": ["live_refs", "query", "observe_fields", "act_expect_read", "scope_path"]}})
         self.result(op)
         return self.c.claim(self.run, {self.robot})
     def tool(self, job, action, params=None, request="tool-1"):
@@ -90,7 +90,7 @@ def test_budget_survives_second_attempt_long_program_and_restart(env):
     assert reopen["params"]["local_run_id"] == "local-2"
     assert reopen["params"]["remaining_seconds"] == 540
     assert "locator_overrides" not in reopen["params"]
-    env.send("recovery_started")
+    env.send("recovery_started", {"capabilities": {"protocol": 2, "features": ["live_refs", "query", "observe_fields", "act_expect_read", "scope_path"]}})
     env.result(reopen)
     env.now[0] += 540
     env.c.tick({env.robot})
@@ -230,7 +230,7 @@ def test_three_complete_recovery_rounds_stop_before_fourth_and_preserve_time_bud
         if number < 3:
             opening = env.c.commands(env.robot)[0]
             assert opening["action"] == "open_recovery"
-            env.send("recovery_started")
+            env.send("recovery_started", {"capabilities": {"protocol": 2, "features": ["live_refs", "query", "observe_fields", "act_expect_read", "scope_path"]}})
             env.result(opening)
             job = env.c.claim(env.run, {env.robot})
     env.c.tick({env.robot})
@@ -318,3 +318,45 @@ def test_observation_failure_log_identifies_error_without_raw_dom(env):
     assert any("页面读取失败（TypeError）" in e["message"] for e in activity)
     assert "观察目标无效（KeyError），请先观察整页" in activity[-1]["message"]
     assert "private DOM" not in str(activity)
+
+
+def test_old_worker_capabilities_stop_before_agent_and_release_only_after_ended(env):
+    start = env.start()
+    env.send("attempt_finished", {"local_run_id": "local-1", "status": "failed", "recoverable": True})
+    env.result(start)
+    env.c.tick({env.robot})
+    opening = env.c.commands(env.robot)[0]
+    env.send("recovery_started", {})
+    env.result(opening)
+    with pytest.raises(Conflict):
+        env.c.claim(env.run, {env.robot})
+    assert env.state()["stop_reason"] == "recovery_protocol_unsupported"
+    env.c.tick({env.robot})
+    assert env.owned() == env.run
+    assert env.c.commands(env.robot)[0]["action"] == "stop"
+    env.send("ended")
+    assert env.owned() is None
+
+
+def test_query_roundtrips_structured_facts_under_existing_serialization(env):
+    job = env.recover()
+    assert job["capabilities"]["protocol"] == 2
+    command = env.tool(job, "query", {"scope": "page", "locator": "css:input", "offset": 100})
+    assert command["action"] == "query"
+    env.result(command, result={"count": 150, "nodes": [{"target": "e1", "scope": "page"}], "truncated": True})
+    assert env.owned() == env.run
+
+
+@pytest.mark.parametrize('field,limit,reason', [('requests', 'max_requests', 'request_budget_exhausted'), ('total', 'max_tokens', 'token_budget_exhausted')])
+def test_cumulative_model_budget_stops_without_releasing_robot(env, field, limit, reason):
+    env.recover()
+    setattr(env.c, limit, 2)
+    with env.db.transaction() as s:
+        run = s.get(Run, env.run)
+        data = deepcopy(run.data)
+        data['token_usage'] = {field: 2}
+        run.data = data
+    env.c.tick({env.robot})
+    assert env.state()['stop_reason'] == reason
+    assert env.owned() == env.run
+    assert env.c.commands(env.robot)[0]['action'] == 'stop'

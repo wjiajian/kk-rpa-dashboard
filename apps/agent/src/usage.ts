@@ -5,8 +5,12 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 export function sessionUsage(manager: Pick<SessionManager, "getEntries" | "getSessionId">) {
   const entries = manager.getEntries();
   const result = { session_id: manager.getSessionId(), revision: entries.length,
-    input: 0, output: 0, cache_read: 0, cache_write: 0, requests: 0, unreported_responses: 0 };
+    input: 0, output: 0, cache_read: 0, cache_write: 0, requests: 0, unreported_responses: 0, model_ms: 0 };
   for (const entry of entries) {
+    if (entry.type === "custom" && entry.customType === "recovery_model_timing") {
+      const elapsed = (entry.data as { milliseconds?: number })?.milliseconds;
+      if (typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0) result.model_ms += elapsed;
+    }
     const message = entry.type === "message" ? entry.message : undefined;
     const summary = entry.type === "compaction" || entry.type === "branch_summary" ? entry : undefined;
     if (message?.role !== "assistant" && !summary?.usage) continue;

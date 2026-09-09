@@ -93,7 +93,7 @@ def test_live_websocket_run_failure_to_agent_resume_and_success(app):
             send("result", command=start)
             recovery = ws.receive_json()
             assert recovery["action"] == "open_recovery"
-            send("recovery_started")
+            send("recovery_started", {"capabilities": {"protocol": 2, "features": ["live_refs", "query", "observe_fields", "act_expect_read", "scope_path"]}})
             send("result", command=recovery)
             internal = {"Authorization": "Bearer internal-secret"}
             job = client.post(f"/internal/runs/{run_id}/claim", headers=internal, json={}).json()
