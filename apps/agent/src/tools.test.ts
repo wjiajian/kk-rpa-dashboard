@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { ToolGate, recoveryTools } from "./tools.js";
 import { makeSession, SYSTEM } from "./session.js";
 
@@ -31,6 +32,14 @@ test("custom tool allowlist has no programming or arbitrary file tools", () => {
   for (const tool of definitions.filter(t => ["resume", "give_up"].includes(t.name))) {
     assert.ok(tool.parameters.required?.includes("summary"));
   }
+});
+
+test("read field schema accepts tag and attributes but rejects unsupported fields before dispatch", () => {
+  const definitions = recoveryTools(async () => ({ status: "succeeded", result: {} }), new ToolGate());
+  const observe = definitions.find(t => t.name === "observe")!;
+  const call = (fields: string[]) => ({ type: "toolCall" as const, id: "fields", name: "observe", arguments: { target: "field", fields } });
+  assert.deepEqual(validateToolArguments(observe, call(["tag", "text", "attr:role"])).fields, ["tag", "text", "attr:role"]);
+  assert.throws(() => validateToolArguments(observe, call(["unsupported"])), /validation|invalid/i);
 });
 
 test("an observation error preserves its screenshot and cannot authorize browser actions", async () => {
@@ -108,4 +117,28 @@ test("structured action failure preserves covering object and fences the batch",
   await assert.rejects(tool("act").execute("blocked", { operation: "click", target: "e1" }));
   gate.nextTurn();
   await tool("query").execute("fresh", { scope: "e1", relation: "over" });
+});
+
+test("covered click can be retried explicitly through DOM after fresh observation", async () => {
+  const gate = new ToolGate();
+  const calls: Record<string, unknown>[] = [];
+  const definitions = recoveryTools(async (_id, action, params) => {
+    if (action !== "act") return { status: "succeeded", result: { target: "field", enabled: true } };
+    calls.push(params);
+    return { status: "succeeded", result: params.by_js
+      ? { issued: true, method: "js", condition_met: true, state: { value: "selected" } }
+      : { issued: false, error: "covered", cover: "reminder" } };
+  }, gate);
+  const tool = (name: string) => definitions.find(t => t.name === name)!;
+  await tool("observe").execute("initial", { target: "field" });
+  await tool("act").execute("mouse", { operation: "click", target: "field" });
+  gate.nextTurn();
+  await tool("observe").execute("fresh", { target: "field" });
+  const args = { operation: "click", target: "field", by_js: true,
+    expect: { property: "value", equals: "selected" }, read: ["value"] };
+  const validated = validateToolArguments(tool("act"), { type: "toolCall", id: "dom", name: "act", arguments: args });
+  const reply = await tool("act").execute("dom", validated);
+  assert.deepEqual(calls, [{ operation: "click", target: "field" }, args]);
+  assert.equal(reply.details.method, "js");
+  assert.equal(reply.details.condition_met, true);
 });

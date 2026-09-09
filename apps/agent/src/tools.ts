@@ -80,19 +80,22 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
       });
     },
   });
-  const fields = Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 20 }));
+  const fields = Type.Optional(Type.Array(Type.Union([
+    ...["tag", "value", "text", "attrs", "alive", "displayed", "enabled", "clickable", "checked", "covered", "rect"].map(v => Type.Literal(v)),
+    Type.String({ pattern: "^attr:.+$", maxLength: 100 }),
+  ]), { maxItems: 20 }));
   const scopePath = Type.Array(object({ kind: Type.Union([Type.Literal("frame"), Type.Literal("shadow")]), locator: Type.String() }), { maxItems: 16 });
   return [
     tool("context", "默认读取失败步骤的完整契约、元素及原参数。step 指定其他步骤；full=true 读取全文和完整诊断。", object({
       step: optionalText, full: Type.Optional(Type.Boolean()),
     })),
-    tool("query", "在指定 scope（默认 page）即时查询。locator 用 css:选择器 或 xpath:表达式；也接受 DrissionPage 原生定位和以 /、./、../ 开头的 XPath。返回完整匹配数和分页；多匹配须消歧。relation 支持父子、相邻、遮挡、视觉坐标和 frame/shadow 入口；document 不带 locator 时仅返回所属文档 scope 和 queried=false，不表示页面为空；带 locator 时在该文档实际查询。DOM 读取报错不等于没有 DOM，应结合截图和 observation_location 判断。", object({
+    tool("query", "在指定 scope（默认 page）即时查询。locator 用 css:选择器 或 xpath:表达式；也接受 DrissionPage 原生定位和以 /、./、../ 开头的 XPath。返回完整匹配数和分页；多匹配须消歧。relation 支持父子、相邻、遮挡、视觉坐标和 frame/shadow 入口；frame/shadow 带 locator 时进入后查询，不带时返回作用域引用；document 不带 locator 时仅返回所属文档 scope 和 queried=false，不表示页面为空；带 locator 时在该文档实际查询。DOM 读取报错不等于没有 DOM，应结合截图和 observation_location 判断。", object({
       scope: optionalText, locator: optionalText,
       relation: Type.Optional(Type.Union(["descendants", "parent", "children", "next", "prev", "over", "offset", "frame", "shadow", "document"].map(v => Type.Literal(v)))),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })), offset: Type.Optional(Type.Integer({ minimum: 0 })),
       x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()),
     })),
-    tool("observe", "按字段读取活引用或正式元素 ID。fields: value/text/attrs/alive/displayed/enabled/clickable/checked/covered/rect/attr:名称。value 与 text 不同。无 target 时枚举当前 scope 的控件；默认首次截图，此后按需。include_locators 导出完整作用域定位。", object({
+    tool("observe", "按字段读取活引用或正式元素 ID。fields: tag/value/text/attrs/alive/displayed/enabled/clickable/checked/covered/rect/attr:名称。value 与 text 不同。无 target 时枚举当前 scope 的控件；默认首次截图，此后按需。include_locators 导出完整作用域定位。", object({
       target: optionalText, scope: optionalText, fields,
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })), offset: Type.Optional(Type.Integer({ minimum: 0 })),
       screenshot: Type.Optional(Type.Boolean()), include_locators: Type.Optional(Type.Boolean()),
@@ -101,7 +104,7 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
       operation: Type.Union(["navigate", "click", "new_tab", "input", "select", "check", "hover", "scroll", "key", "read", "wait", "download"].map(v => Type.Literal(v))),
       target: optionalText, value: optionalText, filename: optionalText, read: fields,
       seconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 15 })),
-      by_js: Type.Optional(Type.Boolean()), checked: Type.Optional(Type.Boolean()),
+      by_js: Type.Optional(Type.Boolean({ description: "仅 click/new_tab：true 使用 DOM 点击，不依赖鼠标位置，不因遮挡或移动被拒绝。确认目标后可用于被普通提醒框遮挡的控件；用 expect/read 验证实际效果，不响应时先处理弹窗。" })), checked: Type.Optional(Type.Boolean()),
       direction: Type.Optional(Type.Union(["up", "down", "left", "right"].map(v => Type.Literal(v)))),
       pixels: Type.Optional(Type.Integer({ minimum: 1, maximum: 10000 })),
       expect: Type.Optional(object({ target: optionalText, scope: optionalText, query: optionalText,
