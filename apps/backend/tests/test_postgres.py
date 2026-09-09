@@ -64,3 +64,54 @@ def test_persisted_budget_and_event_replay_after_new_controller(pg):
         saved = session.get(Run, run).data
         assert len(saved["attempts"]) == 1
         assert saved["executor_seq"] == 1
+
+
+def test_concurrent_plan_trigger_and_scheduler_do_not_duplicate(pg):
+    from cryptography.fernet import Fernet
+    from datetime import datetime
+    from rpa_console.credentials import CredentialStore
+    from rpa_console.tasks import Tasks, ZONE
+    now = [datetime(2026, 9, 8, 7, 59, tzinfo=ZONE).timestamp()]
+    control = Control(pg, lambda: now[0], CredentialStore(Fernet.generate_key()))
+    robot = control.add_robot("plan-robot")
+    control.reconcile(robot["id"], {"deployments": [{"app_id": "a", "version": "1", "input_schema": {
+        "type": "object", "required": ["date"], "properties": {"date": {"type": "string", "format": "date"}}}}]})
+    plans = Tasks(control)
+    plan = plans.save({"name": "daily", "robot_id": robot["id"], "app_id": "a", "version": "1",
+        "input_bindings": {"date": {"kind": "relative_date", "offset_days": -1}}, "download_dir": None,
+        "schedule": {"enabled": True, "cron": "0 8 * * *"}}, {"username": "test", "password": "test"})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        runs = list(pool.map(lambda _: plans.trigger(plan["id"], "same-click"), range(4)))
+    assert len(set(runs)) == 1
+    now[0] += 120
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: plans.tick(), range(4)))
+    with pg.transaction() as s:
+        rows = list(s.scalars(select(Run)))
+        assert len(rows) == 2
+        assert all(r.data["snapshot"]["inputs"]["date"] == "2026-09-07" for r in rows)
+
+
+def test_maintenance_transition_serializes_with_new_run(pg):
+    from concurrent.futures import TimeoutError as FutureTimeout
+    from threading import Event
+    from rpa_console.maintenance import gate, MaintenanceError, status
+    control = Control(pg)
+    robot = control.add_robot('maintenance-race')
+    control.reconcile(robot['id'], {'deployments': [{'app_id': 'demo', 'version': '1'}]})
+    entered = Event()
+    def create():
+        entered.set()
+        return control.create_run(robot['id'], {'app_id': 'demo', 'version': '1', 'inputs': {}}, 'racing-run')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pg.transaction() as s:
+            gate(s).maintenance = True
+            future = pool.submit(create)
+            assert entered.wait(2)
+            with pytest.raises(FutureTimeout):
+                future.result(timeout=0.1)
+        with pytest.raises(MaintenanceError):
+            future.result(timeout=3)
+    with pg.transaction() as s:
+        assert list(s.scalars(select(Run))) == []
+    assert status(pg)['drained'] is True

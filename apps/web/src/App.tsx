@@ -6,6 +6,8 @@ import { PageTitle, NotFound } from "./components/shared";
 import { useResource } from "./live/useResource";
 import { LiveDetail, LiveRobots } from "./live/RunOperations";
 import { ApplicationList, RunList, WorkspaceOverview } from "./live/WorkspacePages";
+import { TaskPlans, EditPlan } from "./live/TaskPlans";
+import Publishing from "./live/Publishing";
 import NewTask from "./live/NewTask";
 
 export interface ConsoleUser { name: string; admin: boolean }
@@ -35,11 +37,12 @@ export default function App() {
 export function ConsoleRoutes({ user }: { user: ConsoleUser }) {
   return user.admin ? <Routes>
     <Route path="/" element={<WorkspaceOverview />} />
-    <Route path="/applications" element={<ApplicationList />} />
-    <Route path="/tasks" element={<RunList tasks />} />
-    <Route path="/tasks/new" element={<NewTask />} />
+    <Route path="/applications" element={<Publishing />} />
+    <Route path="/tasks" element={<TaskPlans />} />
+    <Route path="/tasks/new" element={<NewTask plan />} />
+    <Route path="/tasks/:id" element={<EditPlan />} />
     <Route path="/runs" element={<RunList />} />
-    <Route path="/runs/new" element={<Navigate replace to="/tasks/new" />} />
+    <Route path="/runs/new" element={<NewTask />} />
     <Route path="/runs/:id" element={<LiveDetail business={false} />} />
     <Route path="/robots" element={<LiveRobots />} />
     <Route path="/business/runs" element={<RunList business />} />

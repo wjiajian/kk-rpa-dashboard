@@ -20,7 +20,7 @@ export class ToolGate {
       }
       try {
         const result = await invoke();
-        if (["observe", "query"].includes(action)) this.needsObservation = false;
+        if (["observe", "query"].includes(action) && !this.failedTurn) this.needsObservation = false;
         if (["resume", "give_up"].includes(action)) this.finished = true;
         return result;
       } catch (error) {
@@ -65,9 +65,10 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
         const count = (attempts.get(signature) ?? 0) + 1;
         attempts.set(signature, count);
         if (count > 1) result.repetition = { count, hint: "同一查询/对象、参数和事实重复；尚无新证据，请调整策略或 give_up。动作已发出不代表业务恢复。" };
-        if (reply.status !== "succeeded" || result.observation_error) throw new Error(JSON.stringify(result));
-        if (result.error) {
-          // Keep structured failure facts (including covering references) visible.
+        if (reply.status !== "succeeded") throw new Error(JSON.stringify(result));
+        if (result.error || result.observation_error) {
+          // DOM failures still carry a screenshot. Return the evidence while
+          // fencing the batch; throwing here would discard the image.
           gate.failedTurn = true;
           gate.needsObservation = true;
         }
@@ -85,7 +86,7 @@ export function recoveryTools(invoke: Invoke, gate: ToolGate) {
     tool("context", "默认读取失败步骤的完整契约、元素及原参数。step 指定其他步骤；full=true 读取全文和完整诊断。", object({
       step: optionalText, full: Type.Optional(Type.Boolean()),
     })),
-    tool("query", "在指定 scope（默认 page）即时查询，locator 接受 DrissionPage/CSS/XPath。返回完整匹配数和分页；多匹配须消歧。relation 支持父子、相邻、遮挡、视觉坐标和 frame/shadow 入口；document 返回对象所属文档的 scope。", object({
+    tool("query", "在指定 scope（默认 page）即时查询。locator 用 css:选择器 或 xpath:表达式；也接受 DrissionPage 原生定位和以 /、./、../ 开头的 XPath。返回完整匹配数和分页；多匹配须消歧。relation 支持父子、相邻、遮挡、视觉坐标和 frame/shadow 入口；document 不带 locator 时仅返回所属文档 scope 和 queried=false，不表示页面为空；带 locator 时在该文档实际查询。DOM 读取报错不等于没有 DOM，应结合截图和 observation_location 判断。", object({
       scope: optionalText, locator: optionalText,
       relation: Type.Optional(Type.Union(["descendants", "parent", "children", "next", "prev", "over", "offset", "frame", "shadow", "document"].map(v => Type.Literal(v)))),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })), offset: Type.Optional(Type.Integer({ minimum: 0 })),

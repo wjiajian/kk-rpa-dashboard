@@ -4,7 +4,9 @@ RPA 控制台与失败接管 Agent。包含 React 前端、Python/FastAPI 运行
 
 分享交流文档见 [技术分享导读](docs/sharing/README.md)，包含 [Monorepo 技术说明](docs/sharing/monorepo.md) 和 [Dashboard 技术说明](docs/sharing/dashboard.md)：框架、技术选型、设计思路、实现进度与待完成内容。
 
-失败接管的实现、配置与验收状态见 [接管实施说明](docs/recovery-implementation.md)，原规格见 [Dashboard RPA 失败接管](workflows/dashboard-rpa-recovery.md)。代码与离线接口已验证；Windows 真实业务、飞书登录与 DeepSeek 官方模型的现场验收尚未进行。
+下一阶段的产品决策、数据与接口、实施顺序及验收统一见 [完整平台实施方案](docs/platform-implementation.md)，覆盖参数接入、可复用计划、Git 发布和单机正式部署。最新状态见方案中的实施记录；README 与分享导读不另行维护阶段待办。
+
+失败接管的实现、配置与验收状态见 [接管实施说明](docs/recovery-implementation.md)，原规格见 [Dashboard RPA 失败接管](workflows/dashboard-rpa-recovery.md)。代码与离线接口已验证；已有现场运行和调试记录；最新 Windows、飞书登录与真实模型完整验收仍待完成。
 
 ## 真实运行模式
 
@@ -16,7 +18,7 @@ Windows 拉取同级 monorepo 的最新代码，在仓库根目录运行 `.\pack
 
 本地开发和部署统一使用同一套控制台界面，不再通过 `VITE_RUNTIME` 切换演示/测试页面。工作总览、应用中心、任务创建、运行记录及机器人管理均读取真实接口；接口失败时显示错误，不回退示例数据。
 
-新建任务按“应用 → 机器人 → 参数 → 登录配置”填写，提交后直接加入执行队列。默认不预选应用、机器人或业务参数。应用来自机器人上报的已部署版本。旧版部署未上报参数声明时，保留 JSON 参数输入。当前后端不支持保存可复用计划和定时调度，界面仅提供实际可用的手动触发。
+计划与临时运行均按“应用 → 机器人 → 参数 → 登录配置 → 触发配置”填写；计划保存不立即运行，临时运行提交后加入队列。默认不预选应用、机器人或业务参数。应用来自机器人上报的已部署版本。旧版部署未上报参数声明时，保留 JSON 参数输入。本地新版本已提供计划保存、编辑、日/周/月/Cron 及日期绑定；`/tasks` 管理计划，`/runs/new` 发起临时运行。迁移版本与部署步骤按实际发布版本核对，实施进度与待验收项见统一方案。
 
 开发验证：`pnpm build`、`pnpm test`、`pnpm test:backend`。后端使用 `uv sync --project apps/backend` 安装锁定依赖。
 

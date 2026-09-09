@@ -1,0 +1,120 @@
+// Exercises the current console against tests/console_fixture.py; no mocked HTTP responses.
+const assert = require('node:assert/strict');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
+const base = process.env.CONSOLE_BROWSER_URL || 'http://127.0.0.1:4190';
+if (new URL(base).hostname !== '127.0.0.1') throw new Error('Use the isolated loopback fixture only');
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ timezoneId: 'America/Los_Angeles' });
+  await context.addCookies([{ name: 'rpa_session', value: 'console-browser-fixture', url: base }]);
+  const page = await context.newPage();
+  const read = async path => {
+    const response = await context.request.get(base + '/api' + path);
+    assert.equal(response.status(), 200);
+    return response.json();
+  };
+  const parameters = async () => {
+    await page.getByRole('button', { name: '参数', exact: true }).click();
+    return page.getByRole('dialog');
+  };
+  const choose = async commit => {
+    await page.getByRole('combobox', { name: '执行应用', exact: true }).press('ArrowDown');
+    await page.getByText('fixture.inventory · v1.0 · ' + commit, { exact: true }).click();
+    await page.getByRole('combobox', { name: '执行机器人', exact: true }).press('ArrowDown');
+    await page.getByText('离线验收机器人 · 离线', { exact: true }).click();
+  };
+  try {
+    assert.equal((await read('/tasks')).length, 0, 'Start with a fresh fixture');
+    await page.goto(base + '/tasks/new');
+    await page.getByRole('heading', { name: '新建计划', exact: true }).waitFor();
+    assert.equal(await page.getByLabel('登录账号', { exact: true }).inputValue(), '');
+    assert.equal(await page.getByLabel('登录密码', { exact: true }).inputValue(), '');
+    await page.getByText('请选择执行应用', { exact: true }).waitFor();
+    await page.getByText('请选择执行机器人', { exact: true }).waitFor();
+    await page.getByLabel('任务名称', { exact: true }).fill('页面验收计划');
+    await choose('aaaaaaaa');
+    let modal = await parameters();
+    assert.equal(await modal.getByLabel('品牌', { exact: true }).inputValue(), '');
+    await modal.getByLabel('品牌', { exact: true }).fill('取消值');
+    await modal.getByRole('button', { name: '取 消' }).click();
+    modal = await parameters();
+    assert.equal(await modal.getByLabel('品牌', { exact: true }).inputValue(), '');
+    await modal.getByLabel('品牌', { exact: true }).fill('品牌一');
+    await modal.getByRole('button', { name: '确 定' }).click();
+    await page.getByLabel('登录账号', { exact: true }).fill('fixture-account');
+    await page.getByLabel('登录密码', { exact: true }).fill('fixture-password');
+    const save = page.getByRole('button', { name: '保存计划', exact: true });
+    // Two immediate clicks during async validation must still create one plan.
+    await save.evaluate(button => { button.click(); button.click(); });
+    await page.waitForURL('**/tasks');
+    await page.getByRole('link', { name: '页面验收计划', exact: true }).waitFor();
+    let plans = await read('/tasks');
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].commit, 'a'.repeat(40));
+    assert.equal((await read('/runs')).length, 0, 'Saving must not run');
+    await page.reload();
+    await page.getByText('1.0 · aaaaaaaa', { exact: true }).waitFor();
+    await page.getByRole('link', { name: '页面验收计划', exact: true }).click();
+    await page.getByText('账号密码已配置', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('登录密码', { exact: true }).count(), 0);
+    modal = await parameters();
+    assert.equal(await modal.getByLabel('品牌', { exact: true }).inputValue(), '品牌一');
+    await modal.getByRole('button', { name: '取 消' }).click();
+    await choose('bbbbbbbb');
+    modal = await parameters();
+    assert.equal(await modal.getByLabel('品牌', { exact: true }).inputValue(), '', 'Version switch clears prior inputs');
+    await modal.getByLabel('品牌', { exact: true }).fill('品牌二');
+    await modal.getByRole('button', { name: '确 定' }).click();
+    await page.getByLabel('登录账号', { exact: true }).fill('fixture-account');
+    await page.getByLabel('登录密码', { exact: true }).fill('fixture-password');
+    await page.getByLabel('登录账号', { exact: true }).fill('fixture-account-new');
+    assert.equal(await page.getByLabel('登录密码', { exact: true }).inputValue(), '');
+    await page.getByLabel('登录密码', { exact: true }).fill('fixture-password-new');
+    await page.getByRole('button', { name: '保存计划', exact: true }).click();
+    await page.waitForURL('**/tasks');
+    await page.getByText('1.0 · bbbbbbbb', { exact: true }).waitFor();
+    plans = await read('/tasks');
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].commit, 'b'.repeat(40));
+    assert.equal(plans[0].input_bindings.brand_value.value, '品牌二');
+    await page.getByRole('button', { name: '立即运行', exact: true }).click();
+    await page.getByRole('link', { name: '查看运行', exact: true }).waitFor();
+    const runs = await read('/runs');
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, 'queued');
+    assert.equal(runs[0].snapshot.release_id, plans[0].release_id);
+    assert.equal(runs[0].snapshot.inputs.brand_value, '品牌二');
+    const schedule = await context.request.put(base + '/api/tasks/' + plans[0].id + '/schedule', {
+      headers: {Origin: base}, data: {enabled: true, cron: '0 8 * * *', timezone: 'Asia/Shanghai', revision: plans[0].revision}
+    });
+    assert.equal(schedule.status(), 200);
+    const scheduled = await schedule.json();
+    await page.reload();
+    const shanghaiTime = new Date(scheduled.next_run_at * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
+    await page.getByText(shanghaiTime, {exact: true}).waitFor();
+    await page.locator('.ant-spin-blur').waitFor({state: 'hidden'});
+    if (process.env.CONSOLE_BROWSER_SCREENSHOT) await page.screenshot({ path: process.env.CONSOLE_BROWSER_SCREENSHOT, fullPage: true, animations: 'disabled' });
+    await page.goto(base + '/applications');
+    await page.getByRole('combobox', {name: '已导入应用', exact: true}).press('ArrowDown');
+    await page.getByText('验收应用 · 离线验收来源', {exact: true}).click();
+    await page.getByRole('combobox', {name: '部署机器人', exact: true}).press('ArrowDown');
+    await page.getByText('离线验收机器人 · 离线', {exact: true}).click();
+    const installedRow = page.getByRole('row').filter({hasText: 'bbbbbbbbbbbb'});
+    const newRow = page.getByRole('row').filter({hasText: 'cccccccccccc'});
+    await newRow.getByText('未安装', {exact: true}).waitFor();
+    assert.equal(await newRow.getByRole('button', {name:/^卸\s*载$/}).isDisabled(), true);
+    assert.equal(await installedRow.getByRole('button', {name:'已安装', exact:true}).isDisabled(), true);
+    await installedRow.getByRole('button', {name:/^卸\s*载$/}).click();
+    await page.getByText('该版本仍被计划或未结束运行引用', {exact:true}).waitFor();
+    await newRow.getByRole('button', {name:'安装到机器人', exact:true}).click();
+    await newRow.getByText('安装 · 排队中', {exact:true}).waitFor();
+    assert.equal(await newRow.getByRole('button', {name:'安装到机器人', exact:true}).isDisabled(), true);
+    const deploymentState = await read('/robots/' + plans[0].robot_id + '/deployments');
+    assert.equal(deploymentState.jobs.length, 1);
+    assert.equal(deploymentState.jobs[0].status, 'queued');
+    console.log('Publishing page: installed/uninstalled state, protected uninstall, and queued installation passed.');
+    console.log('Current console: empty inputs, cancel, save dedupe, reload, credentials, version switch, offline queue, and Shanghai time passed.');
+  } finally {
+    await browser.close();
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,3 +1,4 @@
+from .maintenance import MaintenanceError
 import asyncio
 import base64
 from contextlib import asynccontextmanager, suppress
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 from time import time
+from typing import Literal
 from urllib.parse import urlencode
 
 import httpx
@@ -17,10 +19,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .control import Conflict, Control, TERMINAL, remaining
 from .credentials import CredentialError, CredentialStore
-from .storage import Database, Event, Evidence, LoginSession, Operation, Robot, Run, RunCredential, uid
+from .tasks import Tasks, cron_times
+from .publishing import Publishing
+from .storage import ApplicationSource, ImportJob, PublishedApplication, ApplicationRelease, RobotDeployment, DeploymentJob
+from .storage import Task, RunTrigger, Database, Event, Evidence, LoginSession, Operation, Robot, Run, RunCredential, uid
 
 
 @dataclass
@@ -35,6 +41,7 @@ class Config:
     admins: tuple = ()
     retention_days: int = 30
     credential_encryption_key: str = ""
+    artifact_dir: str = ""
 
     @classmethod
     def env(cls):
@@ -42,7 +49,7 @@ class Config:
                    os.environ["PUBLIC_URL"].rstrip("/"), os.getenv("EVIDENCE_DIR", "/data/evidence"),
                    os.environ["FEISHU_APP_ID"], os.environ["FEISHU_APP_SECRET"],
                    os.environ["FEISHU_TENANT_KEY"], tuple(os.environ["ADMIN_OPEN_IDS"].split(",")),
-                   int(os.getenv("RETENTION_DAYS", "30")), os.environ["CREDENTIAL_ENCRYPTION_KEY"])
+                   int(os.getenv("RETENTION_DAYS", "30")), os.environ["CREDENTIAL_ENCRYPTION_KEY"], os.getenv("ARTIFACT_DIR", "/data/artifacts"))
 
 
 class StrictModel(BaseModel):
@@ -50,6 +57,7 @@ class StrictModel(BaseModel):
 
 
 class Snapshot(StrictModel):
+    release_id: str | None = None
     app_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     inputs: dict
@@ -66,14 +74,75 @@ class BusinessCredentials(StrictModel):
 
 
 class NewRun(StrictModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
     robot_id: str
     name: str = Field(min_length=1, max_length=200)
     snapshot: Snapshot
     credentials: BusinessCredentials
 
 
+class Schedule(StrictModel):
+    enabled: bool = False
+    cron: str = Field(default="", max_length=200)
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+
+
+class TaskConfig(StrictModel):
+    release_id: str | None = None
+    name: str = Field(min_length=1, max_length=200)
+    robot_id: str
+    app_id: str
+    version: str
+    input_bindings: dict
+    download_dir: str | None = None
+    schedule: Schedule = Field(default_factory=Schedule)
+    credentials: BusinessCredentials | None = None
+    revision: int | None = Field(default=None, ge=1)
+
+
+class ScheduleChange(Schedule):
+    revision: int = Field(ge=1)
+
+
+class Trigger(StrictModel):
+    request_id: str = Field(min_length=1, max_length=200)
+
+
+class CronPreview(StrictModel):
+    cron: str = Field(min_length=1, max_length=200)
+
+
 class NewRobot(StrictModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+class GitCredentials(StrictModel):
+    username: str | None = Field(default=None, max_length=200)
+    token: SecretStr | None = Field(default=None, max_length=10000)
+    ssh_private_key: SecretStr | None = Field(default=None, max_length=20000)
+
+    def plaintext(self):
+        return {key: value.get_secret_value() if isinstance(value, SecretStr) else value
+                for key in type(self).model_fields if (value := getattr(self, key)) is not None}
+
+
+class NewSource(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=1, max_length=2000)
+    credentials: GitCredentials | None = None
+
+
+class NewImport(StrictModel):
+    source_id: str
+    ref: str = Field(min_length=1, max_length=200)
+
+
+class ConfirmImport(StrictModel):
+    app_ids: list[str]
+
+
+class NewDeployment(StrictModel):
+    release_id: str
 
 
 class ToolRequest(StrictModel):
@@ -101,14 +170,22 @@ def create_app(config=None, database=None):
     db = database or Database(cfg.database_url)
     credentials = CredentialStore(cfg.credential_encryption_key)
     control = Control(db, credentials=credentials)
+    tasks = Tasks(control)
     sockets, connected = {}, set()
     agent_seen = [time()]
     evidence_root = Path(cfg.evidence_dir)
     evidence_root.mkdir(parents=True, exist_ok=True)
+    publishing = Publishing(db, credentials, cfg.artifact_dir or str(evidence_root.parent / "artifacts"))
 
     async def scheduler():
         while True:
-            control.tick(connected)
+            try:
+                tasks.tick()
+                control.tick(connected)
+            except OperationalError:
+                # Keep the loop alive after a transient database outage; no next time is committed.
+                await asyncio.sleep(1)
+                continue
             if time() - agent_seen[0] > 30:
                 with db.transaction() as s:
                     abandoned = [r.id for r in s.scalars(select(Run)) if r.data["phase"] == "recovery" and not r.data["stop_reason"]]
@@ -116,7 +193,7 @@ def create_app(config=None, database=None):
                     control.request_stop(run_id, "agent_unavailable")
             for robot_id, socket in list(sockets.items()):
                 try:
-                    for command in control.commands(robot_id):
+                    for command in control.commands(robot_id) + publishing.commands(robot_id):
                         await socket.send_json(command)
                 except CredentialError:
                     with db.transaction() as s:
@@ -144,6 +221,7 @@ def create_app(config=None, database=None):
                         obsolete.append(evidence_root / image.id)
         for path in obsolete:
             path.unlink(missing_ok=True)
+        tasks.reset_after_restart()
         task = asyncio.create_task(scheduler())
         yield
         task.cancel()
@@ -153,9 +231,17 @@ def create_app(config=None, database=None):
     app = FastAPI(title="RPA Recovery Console", lifespan=lifespan)
     app.state.control, app.state.database = control, db
 
+    @app.exception_handler(MaintenanceError)
+    async def maintenance_error(request, error):
+        return JSONResponse(status_code=503, content={"detail": str(error)})
+
     @app.exception_handler(Conflict)
     async def conflict(request, error):
         return JSONResponse(status_code=409, content={"detail": str(error)})
+
+    @app.exception_handler(IntegrityError)
+    async def conflicting_write(request, error):
+        return JSONResponse(status_code=409, content={"detail": "并发请求冲突，请重试原请求或刷新配置"})
 
     @app.exception_handler(CredentialError)
     async def credential_error(request, error):
@@ -240,7 +326,7 @@ def create_app(config=None, database=None):
     def robots():
         with db.transaction() as s:
             return [{"id": r.id, "name": r.name, "active_run": r.active_run, "online": r.id in connected,
-                     "revoked": r.credential_hash is None, "deployments": r.deployments} for r in s.scalars(select(Robot))]
+                     "revoked": r.credential_hash is None, "deployments": r.deployments, "capabilities": r.capabilities, "deployment_job": r.deployment_job} for r in s.scalars(select(Robot))]
 
     @app.post("/api/robots", dependencies=[Depends(admin)])
     def add_robot(body: NewRobot):
@@ -268,7 +354,120 @@ def create_app(config=None, database=None):
                     reject_secrets(item)
         reject_secrets(body.snapshot.inputs)
         return {"id": control.create_run(body.robot_id, body.snapshot.model_dump(), body.name,
-                                         credentials=body.credentials.plaintext())}
+                                         credentials=body.credentials.plaintext(),
+                                         request_id="manual:" + body.request_id if body.request_id else None)}
+
+    @app.get("/api/tasks", dependencies=[Depends(admin)])
+    def list_tasks():
+        with db.transaction() as s:
+            return [tasks.view(task) for task in s.scalars(select(Task).order_by(Task.name, Task.id))]
+
+    @app.get("/api/tasks/{task_id}", dependencies=[Depends(admin)])
+    def get_task(task_id: str):
+        with db.transaction() as s:
+            return tasks.view(tasks.get(s, task_id))
+
+    @app.post("/api/tasks", dependencies=[Depends(admin)])
+    def create_task(body: TaskConfig):
+        return tasks.save(body.model_dump(exclude={"credentials", "revision"}),
+                          body.credentials.plaintext() if body.credentials else None)
+
+    @app.patch("/api/tasks/{task_id}", dependencies=[Depends(admin)])
+    def edit_task(task_id: str, body: TaskConfig):
+        return tasks.save(body.model_dump(exclude={"credentials", "revision"}),
+                          body.credentials.plaintext() if body.credentials else None,
+                          task_id, body.revision)
+
+    @app.put("/api/tasks/{task_id}/schedule", dependencies=[Depends(admin)])
+    def update_schedule(task_id: str, body: ScheduleChange):
+        return tasks.schedule(task_id, body.revision, body.model_dump(exclude={"revision"}))
+
+    @app.post("/api/tasks/{task_id}/runs", dependencies=[Depends(admin)])
+    def trigger_task(task_id: str, body: Trigger):
+        return {"id": tasks.trigger(task_id, body.request_id)}
+
+    @app.post("/api/schedules/preview", dependencies=[Depends(admin)])
+    def preview_schedule(body: CronPreview):
+        return {"timezone": "Asia/Shanghai", "dates": cron_times(body.cron, time())}
+
+    @app.get("/api/application-sources", dependencies=[Depends(admin)])
+    def sources():
+        with db.transaction() as s:
+            return [publishing.source_view(row) for row in s.scalars(select(ApplicationSource))]
+
+    @app.post("/api/application-sources", dependencies=[Depends(admin)])
+    def create_source(body: NewSource):
+        return publishing.add_source(body.name, body.url, body.credentials.plaintext() if body.credentials else None)
+
+    @app.get("/api/application-imports", dependencies=[Depends(admin)])
+    def imports():
+        with db.transaction() as s:
+            return [publishing.import_view(row) for row in s.scalars(select(ImportJob).order_by(ImportJob.created.desc()).limit(100))]
+
+    @app.post("/api/application-imports", dependencies=[Depends(admin)])
+    def create_import(body: NewImport):
+        return publishing.import_source(body.source_id, body.ref)
+
+    @app.get("/api/application-imports/{job_id}", dependencies=[Depends(admin)])
+    def import_detail(job_id: str):
+        with db.transaction() as s:
+            job = s.get(ImportJob, job_id)
+            if not job:
+                raise HTTPException(404, "导入作业不存在")
+            return publishing.import_view(job)
+
+    @app.post("/api/application-imports/{job_id}/confirm", dependencies=[Depends(admin)])
+    def confirm_import(job_id: str, body: ConfirmImport):
+        return publishing.confirm(job_id, body.app_ids)
+
+    @app.get("/api/applications", dependencies=[Depends(admin)])
+    def applications():
+        with db.transaction() as s:
+            return [{"id": row.id, "source_id": row.source_id, "app_id": row.app_id, "name": row.name}
+                    for row in s.scalars(select(PublishedApplication).order_by(PublishedApplication.name))]
+
+    @app.get("/api/applications/{app_id}/releases", dependencies=[Depends(admin)])
+    def releases(app_id: str):
+        with db.transaction() as s:
+            return [publishing.release_view(row) for row in s.scalars(select(ApplicationRelease).where(ApplicationRelease.application_id == app_id))]
+
+    @app.get("/api/application-releases/{release_id}/form", dependencies=[Depends(admin)])
+    def release_form(release_id: str):
+        with db.transaction() as s:
+            release = s.get(ApplicationRelease, release_id)
+            if not release:
+                raise HTTPException(404, "发布版本不存在")
+            return release.data["input_schema"]
+
+    @app.get("/api/robots/{robot_id}/deployments", dependencies=[Depends(admin)])
+    def deployments(robot_id: str):
+        with db.transaction() as s:
+            return {"deployments": [{"release_id": row.release_id, "status": row.status, **row.data}
+                    for row in s.scalars(select(RobotDeployment).where(RobotDeployment.robot_id == robot_id))],
+                    "jobs": [publishing.job_view(row) for row in s.scalars(select(DeploymentJob).where(DeploymentJob.robot_id == robot_id).order_by(DeploymentJob.created.desc()).limit(100))]}
+
+    @app.post("/api/robots/{robot_id}/deployments", dependencies=[Depends(admin)])
+    def install_release(robot_id: str, body: NewDeployment):
+        return publishing.request_deployment(robot_id, body.release_id)
+
+    @app.delete("/api/robots/{robot_id}/deployments/{release_id}", dependencies=[Depends(admin)])
+    def uninstall_release(robot_id: str, release_id: str):
+        return publishing.request_deployment(robot_id, release_id, "uninstall")
+
+    @app.get("/api/deployment-jobs/{job_id}", dependencies=[Depends(admin)])
+    def deployment_job(job_id: str):
+        with db.transaction() as s:
+            job = s.get(DeploymentJob, job_id)
+            if not job:
+                raise HTTPException(404, "部署作业不存在")
+            return publishing.job_view(job)
+
+    @app.get("/api/robot-deployment-jobs/{job_id}/artifact")
+    def deployment_artifact(job_id: str, request: Request):
+        robot_id = control.authenticate_robot(request.headers.get("Authorization", "").removeprefix("Bearer "))
+        if not robot_id:
+            raise HTTPException(401, "机器人认证失败")
+        return FileResponse(publishing.artifact(robot_id, job_id), media_type="application/x-tar")
 
     @app.post("/api/runs/{run_id}/rerun", dependencies=[Depends(admin)])
     def rerun(run_id: str):
@@ -391,6 +590,7 @@ def create_app(config=None, database=None):
         try:
             hello = await asyncio.wait_for(socket.receive_json(), 15)
             control.reconcile(robot_id, hello)
+            publishing.reconcile(robot_id, hello)
             with db.transaction() as s:
                 robot = s.get(Robot, robot_id)
                 run = s.get(Run, robot.active_run or hello.get("active_run")) if robot.active_run or hello.get("active_run") else None
@@ -402,6 +602,10 @@ def create_app(config=None, database=None):
                 message = await socket.receive_json()
                 if message["type"] == "ready":
                     connected.add(robot_id)
+                    continue
+                if message["type"] == "deployment_report":
+                    seq = publishing.accept(robot_id, message)
+                    await socket.send_json({"type": "deployment_ack", "job_id": message["job_id"], "seq": seq})
                     continue
                 obsolete = []
                 def record_image(s, run, event):
@@ -437,7 +641,7 @@ def create_app(config=None, database=None):
                 raise Conflict("运行未达到清理期限")
             for evidence in s.scalars(select(Evidence).where(Evidence.run_id == run_id)):
                 (evidence_root / evidence.id).unlink(missing_ok=True)
-            for table in (Evidence, Event, Operation, RunCredential):
+            for table in (Evidence, Event, Operation, RunCredential, RunTrigger):
                 s.execute(delete(table).where(table.run_id == run_id))
             s.delete(run)
             s.execute(delete(LoginSession).where(LoginSession.expires < time()))

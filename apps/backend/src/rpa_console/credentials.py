@@ -3,7 +3,7 @@ import json
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .storage import RunCredential
+from .storage import RunCredential, TaskCredential
 
 
 class CredentialError(ValueError):
@@ -28,4 +28,24 @@ class CredentialStore:
             raise CredentialError("业务凭据无法解密，请检查服务端原有 CREDENTIAL_ENCRYPTION_KEY") from None
         if payload.get("run_id") != run_id:
             raise CredentialError("业务凭据与运行不匹配")
+        return payload["credentials"]
+
+    def save_task(self, session, task_id, credentials):
+        encrypted = self.cipher.encrypt(json.dumps({"task_id": task_id, "credentials": credentials}).encode()).decode()
+        row = session.get(TaskCredential, task_id)
+        if row:
+            row.encrypted = encrypted
+        else:
+            session.add(TaskCredential(task_id=task_id, encrypted=encrypted))
+
+    def read_task(self, session, task_id):
+        row = session.get(TaskCredential, task_id)
+        if row is None:
+            raise CredentialError("计划没有配置账号密码")
+        try:
+            payload = json.loads(self.cipher.decrypt(row.encrypted))
+        except (InvalidToken, ValueError):
+            raise CredentialError("计划凭据无法解密，请检查原有加密密钥") from None
+        if payload.get("task_id") != task_id:
+            raise CredentialError("计划凭据归属不匹配")
         return payload["credentials"]

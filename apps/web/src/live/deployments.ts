@@ -1,8 +1,9 @@
 import type { RJSFSchema } from "@rjsf/utils";
 import type { RobotRecord } from "./api";
 export type Deployment = RobotRecord["deployments"][number];
-export const releaseKey = (release: Deployment) => JSON.stringify([release.app_id, release.version]);
+export const releaseKey = (release: Deployment) => JSON.stringify([release.app_id, release.version, release.release_id || null]);
 export function inputSchemaFor(release?: Deployment): RJSFSchema | undefined {
+  if (release?.schema_status === "invalid") return undefined;
   const inputs = release?.form_schema?.properties?.inputs;
   return release?.input_schema || (inputs && typeof inputs === "object" ? inputs : undefined);
 }

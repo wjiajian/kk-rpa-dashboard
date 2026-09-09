@@ -4,7 +4,7 @@
 
 | 项目 | Mac 测试环境 | Linux 实际服务端 |
 | --- | --- | --- |
-| 应用服务 | Docker Desktop 上的 Web、backend、Agent | Docker Engine + Compose 上的相同三个服务 |
+| 应用服务 | Docker Desktop 上的 Web、backend、Agent、publisher | Docker Engine + Compose 上的相同四个服务 |
 | HTTPS/WSS 入口 | Mac 本机 ngrok → `127.0.0.1:8088` | 正式域名 → Linux HTTPS 反向代理 → `127.0.0.1:8088` |
 | 数据库 | 复用 Mac 已有 PostgreSQL 容器，独立应用库 | Linux 环境自己的 PostgreSQL 应用库 |
 | 配置来源 | `mac.py prepare` 自动填已知值，再补外部凭据 | 从完整 `.env.example` 独立配置 |
@@ -39,7 +39,7 @@
 
 ## Mac 测试服务端与 Windows 执行端
 
-Mac 仅承担测试服务端，运行 Web、后端和 Agent 三个容器。数据库使用已经运行的 PostgreSQL 容器；后端加入其现有 Docker 网络，以容器名连接。ngrok 将公网 HTTPS/WSS 转发到 Mac 的 `127.0.0.1:8088`，不用 hosts、自签证书或 Windows CA 配置。外部仍经过飞书登录和机器人凭据认证。
+Mac 仅承担测试服务端，运行 Web、后端、Agent 和 publisher 四个容器。数据库使用已经运行的 PostgreSQL 容器；后端加入其现有 Docker 网络，以容器名连接。ngrok 将公网 HTTPS/WSS 转发到 Mac 的 `127.0.0.1:8088`，不用 hosts、自签证书或 Windows CA 配置。外部仍经过飞书登录和机器人凭据认证。
 
 ### Mac 首次准备
 
@@ -81,7 +81,7 @@ python3 deploy/mac.py prepare
 python3 deploy/mac.py up
 ```
 
-启动脚本先检查五项配置，再在现有 PostgreSQL 中创建独立的 `rpa_console` 角色和数据库，最后构建并启动三个服务。不会新建 PostgreSQL 容器、重置已有角色密码、改动现有业务数据库或修改其端口。如果同名数据库已有其他属主，脚本停止并说明原因。
+启动脚本先检查五项配置，再在现有 PostgreSQL 中创建独立的 `rpa_console` 角色和数据库，最后构建并启动四个服务。不会新建 PostgreSQL 容器、重置已有角色密码、改动现有业务数据库或修改其端口。如果同名数据库已有其他属主，脚本停止并说明原因。
 
 首次启动后，浏览器打开 ngrok 地址，通过飞书登录，在“机器人”页面创建机器人并保存一次性显示的连接凭据。ngrok 免费域名若显示访问提示页，先按页面提示进入。
 
@@ -126,9 +126,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packages\rpa-executor\
 
 ### 在控制台填写本次运行的业务账号
 
-Windows 在线后，统一在当前控制台的“任务管理 → 新建任务”中选择应用及版本、执行机器人，点击“参数”填写业务输入，再填写账号、密码和下载目录，点击“立即执行”。所有选择和参数初始为空。新旧测试地址均使用同一套界面，不再切换独立测试页。当前两个程序只验证已登录会话，不匹配预期可见身份。
+Windows 在线后，在当前控制台“运行记录”的临时运行入口（`/runs/new`）选择应用及版本、执行机器人，点击“参数”填写业务输入，再填写账号、密码和下载目录后提交。需要复用时，在“任务管理”创建计划；保存后再单独点击“立即运行”。所有选择和参数初始为空。新旧测试地址均使用同一套界面，不再切换独立测试页。当前两个程序只验证已登录会话，不匹配预期可见身份。
 
-任务提交后打开真实运行详情，可查看日志、接管过程、Token 用量与截图，并取消排队、请求停止或从头重跑。当前仅支持手动触发，后端尚无计划保存和定时调度接口。
+任务提交后打开真实运行详情，可查看日志、接管过程、Token 用量与截图，并取消排队、请求停止或从头重跑。新版支持计划保存及上海时区日、周、月和五段 Cron；首次联调先验收手动运行，再开启定时。
 
 这三项凭据只通过专用字段提交，不放进业务参数 JSON。backend 使用独立 `CREDENTIAL_ENCRYPTION_KEY` 加密保存；派发时只向认证通过且承担此 Run 的机器人提供明文。Agent 仍只拿到凭据字段引用，使用 `credential` 工具让执行端代填，不接触密码。
 
@@ -138,7 +138,7 @@ Windows 在线后，统一在当前控制台的“任务管理 → 新建任务�
 
 升级前先结束活跃 Run。Mac 执行 `python3 deploy/mac.py prepare` 自动补齐新的加密密钥，保留其余已填配置，再执行 `python3 deploy/mac.py up` 更新镜像和数据库表。Windows 同步本轮执行端代码后重启 `start.ps1`。服务端与 Windows 需同时更新，旧执行端仍会查找本地账号配置。
 
-Linux 在独立 `.env` 中增加 `CREDENTIAL_ENCRYPTION_KEY`，然后按下文 Compose 启动命令更新。backend 启动时执行 `0002` 迁移创建加密凭据表。该密钥要与数据库备份一起妥善保存；不要在已有凭据记录后重新随机生成，否则旧运行无法解密。
+Linux 在独立 `.env` 中增加 `CREDENTIAL_ENCRYPTION_KEY`，然后按下文 Compose 启动命令更新。凭据存储最初由 `0002` 引入；当前 backend 启动会迁移至 `0005`，包含计划、发布与维护状态。该密钥要与数据库备份一起妥善保存；不要在已有凭据记录后重新随机生成，否则旧运行无法解密。
 
 ### 日常操作与验证
 
@@ -148,12 +148,12 @@ python3 deploy/mac.py down
 python3 deploy/mac.py up
 ```
 
-以上命令在 dashboard 根目录执行。`down` 只关闭本项目三个服务，保留证据/会话卷，不关闭共享 PostgreSQL、不删除其数据库；ngrok 在终端一用 Ctrl+C 停止。ngrok 地址变化时重新执行 `prepare`，同步飞书回调和 Windows 地址，再执行 `up`。`up` 会应用 `.env` 变更。
+以上命令在 dashboard 根目录执行。`down` 只关闭本项目四个服务，保留证据、会话、发布制品及 Git 配置卷，不关闭共享 PostgreSQL、不删除其数据库；ngrok 在终端一用 Ctrl+C 停止。ngrok 地址变化时重新执行 `prepare`，同步飞书回调和 Windows 地址，再执行 `up`。`up` 会应用 `.env` 变更。
 
 健康检查：`curl -H 'ngrok-skip-browser-warning: 1' https://实际域名/api/health`，应返回 `{"status":"ok","mode":"live"}`。查看日志：
 
 ```sh
-docker compose --env-file deploy/.env -f deploy/compose.yaml logs --tail=100 backend agent web
+docker compose --env-file deploy/.env -f deploy/compose.yaml logs --tail=100 backend agent publisher web
 ```
 
 部署脚本离线测试：`python3 -m unittest discover -s deploy/tests -v`。Windows 执行桥离线测试：在 monorepo 运行 `uv run --project packages/rpa-executor pytest packages/rpa-executor/tests`。
@@ -164,7 +164,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml logs --tail=100 bac
 
 ## Linux 实际服务端
 
-本节说明当前部署文件在 Linux 上的使用方式；尚未在目标 Linux 服务器部署或验收。Linux 不运行 `mac.py`，也不需要 ngrok。Compose 只启动三个应用服务，不负责在 Linux 上创建数据库角色或数据库。
+本节说明当前部署文件在 Linux 上的使用方式；尚未在目标 Linux 服务器部署或验收。Linux 不运行 `mac.py`，也不需要 ngrok。Compose 只启动四个应用服务，不负责在 Linux 上创建数据库角色或数据库。
 
 ### 1. 准备服务器与数据库
 
@@ -189,7 +189,7 @@ cp -n deploy/.env.example deploy/.env
 chmod 600 deploy/.env
 ```
 
-填写上表全部适用字段，替换所有 `replace-with-*`。`PUBLIC_URL` 设为正式 HTTPS 域名，例如 `https://console.example.com`。数据库口令使用 URL 编码；`AGENT_INTERNAL_TOKEN` 使用独立随机值。`CREDENTIAL_ENCRYPTION_KEY` 为 URL-safe Base64 编码的 32 字节随机密钥，仅提供给 backend；有 Python 3 的机器可用 `python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"` 生成，写入 Linux 私有 `.env` 并备份。示例中的 `POSTGRES_CONTAINER` 与 `POSTGRES_ADMIN` 不会触发任何建库操作。
+填写上表全部适用字段，替换所有 `replace-with-*`。`PUBLIC_URL` 设为正式 HTTPS 域名，例如 `https://console.example.com`。数据库口令使用 URL 编码；`AGENT_INTERNAL_TOKEN` 使用独立随机值。`CREDENTIAL_ENCRYPTION_KEY` 为 URL-safe Base64 编码的 32 字节随机密钥，提供给 backend 和 publisher；有 Python 3 的机器可用 `python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"` 生成，写入 Linux 私有 `.env` 并备份。示例中的 `POSTGRES_CONTAINER` 与 `POSTGRES_ADMIN` 不会触发任何建库操作。
 
 ### 3. 配置正式 HTTPS 入口
 
@@ -207,6 +207,8 @@ console.example.com {
 
 在飞书应用的 **开发配置 → 安全设置 → 重定向 URL** 登记 `https://正式域名/api/auth/feishu/callback`，并确认应用发布范围包含实际使用成员。此地址用于网页登录，不填入事件订阅请求地址。
 
+私有 Git 使用控制台加密保存的只读凭据。SSH 来源还需在 publisher 的 `git_config` 卷中提供经管理员核对的 `/data/git/known_hosts`，文件必须可由容器用户 console 读取；未配置时 SSH 导入明确失败，不关闭主机验证。HTTPS 来源不需要该文件。
+
 ### 4. 启动与验收
 
 在 Linux 的 dashboard 根目录执行：
@@ -220,7 +222,7 @@ curl https://正式域名/api/health
 
 后端启动时自动执行 Alembic 表结构迁移，前提是应用库、角色及连接权限已经准备好。健康检查应返回 `{"status":"ok","mode":"live"}`。随后完成飞书登录、创建机器人，并在 Windows 使用正式地址和这个服务端签发的机器人凭据。可用 `start.ps1 -Configure` 重新录入；不要把测试服务端的机器人凭据当成 Linux 服务端凭据。
 
-Linux 的日常停止、启动和日志查看直接使用上述 Compose 命令；停止使用 `down`，启动使用 `up -d`，日志使用 `logs --tail=100 backend agent web`。持久卷和 PostgreSQL 应用库需要按实际服务器要求备份。服务实例数仍按当前实现保持 backend 一个 worker、Agent 一个实例。
+升级和备份前先按 [维护操作](maintenance.md) 排空并停止服务；备份与空环境恢复见 [恢复说明](backup-recovery.md)。日常启动使用 `up -d`，日志使用 `logs --tail=100 backend agent publisher web`。持久卷和 PostgreSQL 应用库需要按实际服务器要求备份。服务实例数保持 backend 一个 worker、Agent 和 publisher 各一个实例。
 
 参考：[Docker external 网络](https://docs.docker.com/compose/how-tos/networking/)、[回环端口发布](https://docs.docker.com/engine/network/port-publishing/)、[Caddy HTTPS 前提](https://caddyserver.com/docs/quick-starts/https)、[Caddy 反向代理](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)。
 
@@ -230,7 +232,7 @@ Linux 的日常停止、启动和日志查看直接使用上述 Compose 命令�
 
 | 顺序 | 检查 | 通过标准 |
 | --- | --- | --- |
-| 1 | 服务健康 | 三个服务运行，`/api/health` 返回 live/ok |
+| 1 | 服务健康 | 四个服务运行，`/api/health` 返回 live/ok |
 | 2 | 飞书登录 | 配置企业可登录；管理员可创建机器人 |
 | 3 | Windows 连接 | 机器人在线、空闲，并上报两个应用版本 |
 | 4 | 正常 Run | 填写登录账号和密码，按应用要求填输入；步骤、下载及结束状态正确；截图及时可见，日志按时间降序 |
@@ -244,7 +246,7 @@ Linux 的日常停止、启动和日志查看直接使用上述 Compose 命令�
 
 | 现象 | 检查与处理 |
 | --- | --- |
-| ngrok 地址打不开或返回网关错误 | 确认隧道仍运行、目标端口与 `WEB_PORT` 一致、三个应用服务已启动；配置留空时应用尚未启动是预期状态 |
+| ngrok 地址打不开或返回网关错误 | 确认隧道仍运行、目标端口与 `WEB_PORT` 一致、四个应用服务已启动；配置留空时应用尚未启动是预期状态 |
 | `up` 要求补齐五项 | 只编辑私有 `.env`；不要把示例占位值作为真实值 |
 | external 网络不存在或数据库名称无法解析 | 核对当前机器的 `POSTGRES_NETWORK`，以及数据库容器是否加入此网络 |
 | 业务凭据无法解密 | 恢复原有 `CREDENTIAL_ENCRYPTION_KEY`；不要重置为新随机值 |

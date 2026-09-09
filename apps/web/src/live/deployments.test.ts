@@ -14,3 +14,6 @@ it("参数声明只取程序提供的业务输入，不暴露凭据表单", () =
   expect(inputSchemaFor({ app_id: "a", version: "v", form_schema: { properties: { inputs, credentials: { type: "object" } } } })).toEqual(inputs);
   expect(inputSchemaFor({ app_id: "a", version: "v" })).toBeUndefined();
 });
+it("损坏声明不进入参数渲染", () => {
+  expect(inputSchemaFor({ app_id: "a", version: "v", schema_status: "invalid", input_schema: { type: "object" } })).toBeUndefined();
+});

@@ -1,4 +1,5 @@
 """Durable transitions; only executor acknowledgements release robot ownership."""
+from .maintenance import gate, require_accepting
 from copy import deepcopy
 from hashlib import sha256
 import hmac
@@ -8,7 +9,8 @@ from time import time
 
 from sqlalchemy import select
 
-from .storage import Event, Operation, Robot, Run, uid
+from .schemas import normalize_deployment, validate_inputs, require_installed_release
+from .storage import Event, Operation, Robot, RobotDeployment, Run, RunTrigger, uid
 
 TERMINAL = {"succeeded", "failed", "stopped", "cancelled"}
 TOOLS = {"context", "query", "observe", "act", "credential", "resume", "give_up"}
@@ -111,29 +113,58 @@ class Control:
         self.event(s, run, data, "agent_summary", f"Agent 第 {current['number']} 轮接管总结\n{summary}",
                    details={"round": current["number"]})
 
-    def create_run(self, robot_id, snapshot, name, rerun_of=None, credentials=None):
+    def create_run(self, robot_id, snapshot, name, rerun_of=None, credentials=None, request_id=None):
         with self.db.transaction() as s:
-            robot = self.db.lock_robot(s, robot_id)
-            if not robot.credential_hash:
-                raise Conflict("机器人凭据已撤销")
-            if not any(d["app_id"] == snapshot["app_id"] and d["version"] == snapshot["version"]
-                       for d in robot.deployments):
-                raise Conflict("机器人未声明部署此应用版本")
-            run = Run(id=uid(), robot_id=robot_id, created=self.clock(), data={
-                "name": name, "snapshot": deepcopy(snapshot), "rerun_of": rerun_of,
-                "status": "queued", "phase": "queued", "attempt_id": uid(), "attempts": [],
-                "recovery_used": 0.0, "recovery_since": None, "seq": 0,
-                "recovery_rounds": [],
-                "stop_reason": None, "lease": None, "executor_seq": 0,
-            })
-            s.add(run)
-            s.flush()
-            if credentials is not None:
-                self.credentials.save(s, run.id, credentials)
-            data = deepcopy(run.data)
-            self.event(s, run, data, "queued", "运行已排队")
-            run.data = data
-            return run.id
+            return self.create_run_in_session(s, robot_id, snapshot, name, rerun_of, credentials, request_id)
+
+    def create_run_in_session(self, s, robot_id, snapshot, name, rerun_of=None, credentials=None,
+                              request_id=None, intent=None, metadata=None):
+        require_accepting(s)
+        robot = self.db.lock_robot(s, robot_id)
+        intent = intent or {"robot_id": robot_id, "snapshot": snapshot, "name": name, "rerun_of": rerun_of}
+        if request_id:
+            existing = s.get(RunTrigger, request_id)
+            if existing:
+                if existing.intent != intent:
+                    raise Conflict("请求标识已被不同的运行请求使用")
+                if not intent.get("task_id") and credentials is not None and self.credentials.read(s, existing.run_id) != credentials:
+                    raise Conflict("重复请求的凭据不同")
+                return existing.run_id
+        if not robot.credential_hash:
+            raise Conflict("机器人凭据已撤销")
+        deployment = next((d for d in robot.deployments
+                           if d["app_id"] == snapshot["app_id"] and d["version"] == snapshot["version"] and d.get("release_id") == snapshot.get("release_id")), None)
+        if deployment is None:
+            raise Conflict("机器人未声明部署此应用版本")
+        if snapshot.get("release_id"):
+            try:
+                require_installed_release(s, robot_id, snapshot["release_id"])
+            except ValueError as error:
+                raise Conflict(str(error)) from error
+        if not rerun_of:
+            try:
+                validate_inputs(deployment, snapshot["inputs"])
+            except ValueError as error:
+                raise Conflict(str(error)) from error
+        run = Run(id=uid(), robot_id=robot_id, created=self.clock(), data={
+            "name": name, "snapshot": deepcopy(snapshot), "rerun_of": rerun_of,
+            "status": "queued", "phase": "queued", "attempt_id": uid(), "attempts": [],
+            "recovery_used": 0.0, "recovery_since": None, "seq": 0,
+            "recovery_rounds": [],
+            "stop_reason": None, "lease": None, "executor_seq": 0,
+        })
+        s.add(run)
+        s.flush()
+        if credentials is not None:
+            self.credentials.save(s, run.id, credentials)
+        if request_id:
+            s.add(RunTrigger(id=request_id, run_id=run.id, intent=deepcopy(intent)))
+        if metadata:
+            run.data = {**run.data, **deepcopy(metadata)}
+        data = deepcopy(run.data)
+        self.event(s, run, data, "queued", "运行已排队")
+        run.data = data
+        return run.id
 
     def _load(self, s, run_id):
         run = s.get(Run, run_id)
@@ -206,12 +237,13 @@ class Control:
             ids = list(s.scalars(select(Run.id).order_by(Run.created)))
         for run_id in ids:
             with self.db.transaction() as s:
+                maintenance = gate(s).maintenance
                 run, robot, d = self._load(s, run_id)
                 if d["status"] in TERMINAL:
                     continue
                 online = robot.id in connected
                 if d["phase"] == "queued":
-                    if robot.active_run or not online or not robot.credential_hash:
+                    if maintenance or robot.active_run or robot.deployment_job or not online or not robot.credential_hash:
                         continue
                     robot.active_run = run.id
                     d.update(status="starting", phase="starting")
@@ -301,7 +333,7 @@ class Control:
     def reconcile(self, robot_id, hello):
         with self.db.transaction() as s:
             robot = self.db.lock_robot(s, robot_id)
-            robot.deployments = hello.get("deployments", [])
+            robot.deployments = [normalize_deployment(d) for d in hello.get("deployments", [])]
             if not robot.active_run:
                 if hello.get("active_run"):
                     previous = s.get(Run, hello["active_run"])

@@ -37,8 +37,11 @@ export function taskParameters(task: Task, schema: RJSFSchema): ParameterValues 
   const legacy = { brand: task.brand, export_filename: task.filename, target_date: task.date };
   return { ...parameterDefaults(schema), ...Object.fromEntries(Object.entries(legacy).filter(([key]) => key in (schema.properties ?? {}))) };
 }
+export function cleanParameters(values: ParameterValues): ParameterValues {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined));
+}
 export function parameterError(schema: RJSFSchema, values: ParameterValues, relativeDates = false): string | undefined {
-  const normalized = { ...values };
+  const normalized = cleanParameters(values);
   for (const [key, value] of Object.entries(values)) {
     const field = schema.properties?.[key];
     if (relativeDates && typeof field === "object" && field.format === "date" && value && typeof value === "object" && "kind" in value) {

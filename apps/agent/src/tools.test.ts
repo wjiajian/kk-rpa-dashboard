@@ -33,7 +33,7 @@ test("custom tool allowlist has no programming or arbitrary file tools", () => {
   }
 });
 
-test("an observation error with a screenshot cannot authorize browser actions", async () => {
+test("an observation error preserves its screenshot and cannot authorize browser actions", async () => {
   const gate = new ToolGate();
   const calls: string[] = [];
   const definitions = recoveryTools(async (_id, action) => {
@@ -41,10 +41,18 @@ test("an observation error with a screenshot cannot authorize browser actions", 
     return { status: "succeeded", result: { observation_error: "DOM unavailable", image: { mimeType: "image/png", data: "fixture" } } };
   }, gate);
   const observe = definitions.find(t => t.name === "observe")!;
-  await assert.rejects(observe.execute("observe-1", {}, undefined, undefined, {} as any));
+  const reply = await observe.execute("observe-1", {}, undefined, undefined, {} as any);
+  assert.equal(reply.details.observation_error, "DOM unavailable");
+  assert.deepEqual(reply.content[1], { type: "image", mimeType: "image/png", data: "fixture" });
+  assert.equal(gate.failedTurn, true);
+  assert.equal(gate.needsObservation, true);
+  await assert.rejects(observe.execute("blocked-in-same-turn", {}));
   gate.nextTurn();
   await assert.rejects(gate.run("act", async () => calls.push("unsafe")));
   assert.deepEqual(calls, ["observe"]);
+  const fresh = recoveryTools(async () => ({ status: "succeeded", result: { nodes: [] } }), gate);
+  await fresh.find(t => t.name === "query")!.execute("fresh-query", { locator: "css:button" });
+  assert.equal(gate.needsObservation, false);
 });
 
 test("pi Responses serialization keeps images in the associated function output", () => {

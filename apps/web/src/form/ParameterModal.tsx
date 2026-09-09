@@ -5,7 +5,7 @@ import validator from "@rjsf/validator-ajv8";
 import type { RJSFSchema } from "@rjsf/utils";
 import { DateBindingField } from "./DateBindingField";
 import type { Binding } from "../mock/data";
-import { parameterError, parameterFormBehavior, type ParameterValues } from "./parameters";
+import { cleanParameters, parameterError, parameterFormBehavior, type ParameterValues } from "./parameters";
 
 const typeNames: Record<string, string> = { string: "字符串", integer: "整数", number: "数字", boolean: "布尔值", array: "列表", object: "对象" };
 export function ParameterModal({ schema, values, onSave, onCancel, relativeDates = false }: {
@@ -16,7 +16,7 @@ export function ParameterModal({ schema, values, onSave, onCancel, relativeDates
   return <Modal open width={960} title="参数配置" className="parameter-modal" okText="确定" cancelText="取消" onCancel={onCancel} onOk={() => {
     const problem = parameterError(schema, draft, relativeDates);
     setError(problem);
-    if (!problem) onSave(draft);
+    if (!problem) onSave(cleanParameters(draft));
   }}>
     <Alert type="warning" showIcon message="此处填写的参数仅用于本次任务配置，不改变应用内的默认参数。" />
     <h3>输入参数</h3>

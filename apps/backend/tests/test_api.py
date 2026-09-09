@@ -283,3 +283,129 @@ def test_wrong_encryption_key_does_not_dispatch_or_expose_credentials(app):
     detail = client.get(f"/api/runs/{run_id}").json()
     assert detail["status"] == "failed"
     assert all(value not in json.dumps(detail) for value in CREDENTIALS.values())
+
+
+def test_robot_schema_reaches_api_and_rejects_invalid_inputs_before_queue(app):
+    headers = {"Origin": "https://console.test"}
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    robot = client.post("/api/robots", json={"name": "schema-robot"}, headers=headers).json()
+    declaration = {"app_id": "app", "version": "1", "input_schema": {
+        "type": "object", "required": ["target_date"], "additionalProperties": False,
+        "properties": {"target_date": {"type": "string", "format": "date"}}}}
+    with client.websocket_connect("/api/robots/connect", headers={"Authorization": "Bearer " + robot["credential"]}) as ws:
+        ws.send_json({"type": "hello", "requests": {}, "journal_complete": True, "deployments": [declaration]})
+        assert ws.receive_json()["type"] == "sync"
+        reported = client.get("/api/robots").json()[0]["deployments"][0]
+        assert reported["schema_status"] == "valid"
+        assert reported["input_schema"] == declaration["input_schema"]
+        body = {"name": "schema-run", "robot_id": robot["id"], "credentials": CREDENTIALS,
+                "snapshot": {"app_id": "app", "version": "1", "inputs": {"target_date": "2026-02-30"}}}
+        assert client.post("/api/runs", headers=headers, json=body).status_code == 409
+        assert client.get("/api/runs").json() == []
+        body["snapshot"]["inputs"]["target_date"] = "2026-09-08"
+        assert client.post("/api/runs", headers=headers, json=body).status_code == 200
+    app.state.control.reconcile(robot["id"], {"requests": {}, "deployments": [
+        {"app_id": "app", "version": "1", "schema_status": "invalid", "schema_error": "声明文件损坏"}]})
+    assert client.post("/api/runs", headers=headers, json=body).status_code == 409
+
+
+def test_plan_api_persists_permissions_and_immutable_run_credentials(app):
+    headers = {"Origin": "https://console.test"}
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    robot = client.post("/api/robots", json={"name": "planned"}, headers=headers).json()
+    app.state.control.reconcile(robot["id"], {"deployments": [{"app_id": "a", "version": "1", "input_schema": {
+        "type": "object", "required": ["date"], "properties": {"date": {"type": "string", "format": "date"}}}}]})
+    config = {"name": "plan", "robot_id": robot["id"], "app_id": "a", "version": "1",
+              "input_bindings": {"date": {"kind": "literal", "value": "2026-09-08"}}, "credentials": CREDENTIALS}
+    response = client.post("/api/tasks", headers=headers, json=config)
+    assert response.status_code == 200, response.text
+    plan = response.json()
+    assert "test-private" not in response.text and "test-business-login" not in response.text
+    assert client.get("/api/runs").json() == []
+    assert client.get("/api/tasks").json()[0]["id"] == plan["id"]
+    trigger = {"request_id": "click-1"}
+    run = client.post(f'/api/tasks/{plan["id"]}/runs', headers=headers, json=trigger).json()
+    assert client.post(f'/api/tasks/{plan["id"]}/runs', headers=headers, json=trigger).json() == run
+    updated = {**config, "revision": 1, "credentials": {**CREDENTIALS, "password": "REPLACEMENT"}}
+    assert client.patch(f'/api/tasks/{plan["id"]}', headers=headers, json=updated).status_code == 200
+    assert client.patch(f'/api/tasks/{plan["id"]}', headers=headers, json=updated).status_code == 409
+    with app.state.database.transaction() as s:
+        assert app.state.control.credentials.read(s, run["id"]) == CREDENTIALS
+    client.cookies.set("rpa_session", "member-session")
+    for path in ("/api/tasks", f'/api/tasks/{plan["id"]}'):
+        assert client.get(path).status_code == 403
+    assert client.post(f'/api/tasks/{plan["id"]}/runs', headers=headers, json=trigger).status_code == 403
+
+
+def test_temporary_run_request_retries_are_idempotent(app):
+    headers = {"Origin": "https://console.test"}
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    robot = client.post("/api/robots", json={"name": "temporary"}, headers=headers).json()
+    app.state.control.reconcile(robot["id"], {"deployments": [{"app_id": "a", "version": "1"}]})
+    body = {"name": "temporary", "robot_id": robot["id"], "snapshot": {"app_id": "a", "version": "1", "inputs": {}}, "credentials": CREDENTIALS, "request_id": "click-temp"}
+    first = client.post("/api/runs", headers=headers, json=body)
+    assert first.status_code == 200
+    assert client.post("/api/runs", headers=headers, json=body).json() == first.json()
+    assert client.post("/api/runs", headers=headers, json={**body, "name": "different"}).status_code == 409
+
+
+def test_publishing_permissions_encrypted_source_and_assigned_artifact(app, tmp_path):
+    from rpa_console.storage import ApplicationSource, ImportJob, Robot, DeploymentJob
+    from uuid import uuid4
+    client = TestClient(app, base_url="https://console.test")
+    headers = {"Origin": "https://console.test"}
+    paths = ["/api/application-sources", "/api/application-imports", "/api/applications",
+             "/api/robots/missing/deployments", "/api/deployment-jobs/missing"]
+    for path in paths:
+        assert client.get(path).status_code == 401
+    client.cookies.set("rpa_session", "member-session")
+    for path in paths:
+        assert client.get(path).status_code == 403
+    client.cookies.set("rpa_session", "admin-session")
+    body = {"name": "source", "url": "https://example.invalid/repo.git", "credentials": {"token": "PRIVATE_GIT_TEST_TOKEN"}}
+    assert client.post(paths[0], json=body).status_code == 403
+    source = client.post(paths[0], json=body, headers=headers)
+    assert source.status_code == 200
+    assert "PRIVATE_GIT_TEST_TOKEN" not in source.text
+    source_id = source.json()["id"]
+    control, db = app.state.control, app.state.database
+    owner, other = control.add_robot("owner"), control.add_robot("other")
+    import_id = str(uuid4())
+    with db.transaction() as s:
+        saved = s.get(ApplicationSource, source_id)
+        assert saved.encrypted_credentials and "PRIVATE_GIT_TEST_TOKEN" not in saved.encrypted_credentials
+        s.get(Robot, owner["id"]).capabilities = ["deploy-v1"]
+        s.add(ImportJob(id=import_id, source_id=source_id, created=time(), status="ready", data={
+            "ref": "main", "commit": "a" * 40, "artifact": "fixture.tar", "applications": [
+                {"app_id": "sample", "name": "sample", "version": "1", "path": "apps/sample", "errors": [],
+                 "input_schema": {"type": "object", "properties": {}}}]}))
+    response = client.post(f"/api/application-imports/{import_id}/confirm", json={"app_ids": ["sample"]}, headers=headers)
+    assert response.status_code == 200, response.text
+    release = response.json()[0]
+    job = client.post(f'/api/robots/{owner["id"]}/deployments', json={"release_id": release["id"]}, headers=headers).json()
+    artifact = Path(app.state.test_config.evidence_dir).parent / "artifacts/fixture.tar"
+    artifact.write_bytes(b"fixture-source-artifact")
+    path = f'/api/robot-deployment-jobs/{job["id"]}/artifact'
+    assert client.get(path).status_code == 401  # Admin cookie does not grant robot download access.
+    owner_auth = {"Authorization": "Bearer " + owner["credential"]}
+    assert client.get(path, headers=owner_auth).status_code == 409  # Queued is not assigned.
+    with db.transaction() as s:
+        s.get(DeploymentJob, job["id"]).status = "installing"
+        s.get(Robot, owner["id"]).deployment_job = job["id"]
+    assert client.get(path, headers={"Authorization": "Bearer " + other["credential"]}).status_code == 409
+    assert client.get(path, headers=owner_auth).content == b"fixture-source-artifact"
+
+
+def test_maintenance_rejects_new_run_with_visible_service_error(app):
+    from rpa_console.maintenance import set_mode
+    set_mode(app.state.database, True)
+    client = TestClient(app, base_url='https://console.test')
+    client.cookies.set('rpa_session', 'admin-session')
+    response = client.post('/api/runs', headers={'Origin': 'https://console.test'}, json={
+        'name': 'maintenance', 'robot_id': 'unused',
+        'snapshot': {'app_id': 'app', 'version': '1', 'inputs': {}}, 'credentials': CREDENTIALS})
+    assert response.status_code == 503
+    assert '维护中' in response.json()['detail']

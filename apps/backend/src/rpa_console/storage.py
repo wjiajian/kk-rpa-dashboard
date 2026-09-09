@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from time import time
 from uuid import uuid4
 
-from sqlalchemy import JSON, Float, ForeignKey, String, create_engine, select, event
+from sqlalchemy import JSON, Boolean, Integer, UniqueConstraint, Float, ForeignKey, String, create_engine, select, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
@@ -14,6 +14,17 @@ class Base(DeclarativeBase):
     pass
 
 
+class ServiceState(Base):
+    __tablename__ = "service_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    maintenance: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+@event.listens_for(ServiceState.__table__, "after_create")
+def seed_service_state(table, connection, **kwargs):
+    connection.execute(table.insert().values(id=1, maintenance=False))
+
+
 class Robot(Base):
     __tablename__ = "robots"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -21,6 +32,8 @@ class Robot(Base):
     credential_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     active_run: Mapped[str | None] = mapped_column(String, nullable=True)
     deployments: Mapped[list] = mapped_column(JSON, default=list)
+    capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    deployment_job: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Run(Base):
@@ -63,6 +76,84 @@ class Evidence(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     mime: Mapped[str] = mapped_column(String)
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    robot_id: Mapped[str] = mapped_column(ForeignKey("robots.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    next_run_at: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    data: Mapped[dict] = mapped_column(JSON)
+
+
+class TaskCredential(Base):
+    __tablename__ = "task_credentials"
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    encrypted: Mapped[str] = mapped_column(String)
+
+
+class RunTrigger(Base):
+    __tablename__ = "run_triggers"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), unique=True)
+    intent: Mapped[dict] = mapped_column(JSON)
+
+
+class ApplicationSource(Base):
+    __tablename__ = "application_sources"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    url: Mapped[str] = mapped_column(String)
+    encrypted_credentials: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ImportJob(Base):
+    __tablename__ = "import_jobs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("application_sources.id"))
+    created: Mapped[float] = mapped_column(Float, default=time)
+    status: Mapped[str] = mapped_column(String)
+    data: Mapped[dict] = mapped_column(JSON)
+
+
+class PublishedApplication(Base):
+    __tablename__ = "applications"
+    __table_args__ = (UniqueConstraint("source_id", "app_id", name="uq_source_app"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("application_sources.id"))
+    app_id: Mapped[str] = mapped_column(String)
+    name: Mapped[str] = mapped_column(String)
+
+
+class ApplicationRelease(Base):
+    __tablename__ = "application_releases"
+    __table_args__ = (UniqueConstraint("application_id", "commit", name="uq_app_commit"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"))
+    commit: Mapped[str] = mapped_column(String)
+    version: Mapped[str] = mapped_column(String)
+    data: Mapped[dict] = mapped_column(JSON)
+
+
+class RobotDeployment(Base):
+    __tablename__ = "robot_deployments"
+    robot_id: Mapped[str] = mapped_column(ForeignKey("robots.id"), primary_key=True)
+    release_id: Mapped[str] = mapped_column(ForeignKey("application_releases.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DeploymentJob(Base):
+    __tablename__ = "deployment_jobs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    robot_id: Mapped[str] = mapped_column(ForeignKey("robots.id"), index=True)
+    release_id: Mapped[str] = mapped_column(ForeignKey("application_releases.id"))
+    created: Mapped[float] = mapped_column(Float, default=time)
+    status: Mapped[str] = mapped_column(String)
+    data: Mapped[dict] = mapped_column(JSON)
 
 
 class Database:

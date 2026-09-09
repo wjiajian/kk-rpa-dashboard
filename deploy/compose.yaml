@@ -16,9 +16,24 @@ services:
       FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?required}
       ADMIN_OPEN_IDS: ${ADMIN_OPEN_IDS:?required}
       EVIDENCE_DIR: /data/evidence
+      ARTIFACT_DIR: /data/artifacts
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
-    volumes: [evidence:/data/evidence]
+    volumes: [evidence:/data/evidence, artifacts:/data/artifacts]
     networks: [default, database]
+    restart: unless-stopped
+  publisher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    command: ["uv", "run", "--no-sync", "python", "-m", "rpa_console.publisher"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?required}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?required}
+      ARTIFACT_DIR: /data/artifacts
+      GIT_KNOWN_HOSTS_FILE: /data/git/known_hosts
+    volumes: [artifacts:/data/artifacts, git_config:/data/git]
+    networks: [default, database]
+    depends_on: [backend]
     restart: unless-stopped
   agent:
     build:
@@ -47,6 +62,8 @@ services:
     depends_on: [backend]
     restart: unless-stopped
 volumes:
+  artifacts:
+  git_config:
   evidence:
   sessions:
 networks:
