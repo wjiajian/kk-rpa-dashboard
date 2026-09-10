@@ -13,6 +13,7 @@ export const statuses: Record<string, string> = { queued: "排队中", starting:
   recovering: "Agent 接管中", stopping: "停止中", uncertain: "状态待确认", succeeded: "成功", failed: "失败", stopped: "已停止", cancelled: "已取消" };
 export const terminal = (status: string) => ["succeeded", "failed", "stopped", "cancelled"].includes(status);
 export const date = (at?: number) => at ? new Date(at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—";
+export interface PageResult<T> { items: T[]; total: number; page: number; page_size: number; pages: number }
 export interface RunRecord {
   id: string; name: string; status: string; created: number; ended?: number; seq: number;
   phase?: string; robot_id?: string; remaining_seconds?: number; recovery_used?: number; stop_reason?: string;
@@ -22,6 +23,10 @@ export interface RunRecord {
   conclusion?: { reason: string; attempted: string[]; next_actions: string[]; evidence: string[] };
   evidence?: { id: string; url: string }[];
   token_usage?: { input: number; output: number; cache_read: number; cache_write: number; total: number; requests: number; unreported_responses: number };
+}
+export interface AuditRecord {
+  id: string; actor_name: string; actor_open_id: string; action: string;
+  target_type: string; target_id: string; created: number; details: Record<string, unknown>;
 }
 export interface RunEvent { seq: number; kind: string; message: string; at: number; details?: Record<string, unknown> }
 export interface RobotRecord { id: string; name: string; active_run?: string; online: boolean; revoked: boolean; capabilities?: string[]; deployment_job?: string; deployments: { app_id: string; version: string; release_id?: string; commit?: string; input_schema?: RJSFSchema; form_schema?: RJSFSchema; schema_status?: "valid" | "missing" | "invalid"; schema_error?: string }[] }

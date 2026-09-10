@@ -3,10 +3,13 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App as AntApp } from "antd";
 import { ConsoleRoutes, consoleNavigation } from "../App";
-vi.mock("./useResource", () => ({ useResource: (path: string) => ({
-  data: path === "/robots" ? [{ id: "robot-live", name: "接口机器人", online: true, revoked: false, deployments: [{ app_id: "actual-program", version: "1.0" }] }] : path === "/tasks" ? [{ id: "saved-plan", name: "接口计划", robot_id: "robot-live", app_id: "actual-program", version: "1.0", revision: 1, schedule: { enabled: false, cron: "", timezone: "Asia/Shanghai" } }] : [{ id: "real-run", name: "接口运行记录", status: "queued", created: 1, robot_id: "robot-live", snapshot: { app_id: "actual-program", version: "1.0", inputs: {} } }],
-  error: "", refresh: () => {},
-}) }));
+vi.mock("./useResource", () => ({ useResource: (path: string) => {
+  const run = { id: "real-run", name: "接口运行记录", status: "queued", created: 1, robot_id: "robot-live", snapshot: { app_id: "actual-program", version: "1.0", inputs: {} } };
+  return {
+    data: path === "/robots" ? [{ id: "robot-live", name: "接口机器人", online: true, revoked: false, deployments: [{ app_id: "actual-program", version: "1.0" }] }] : path === "/tasks" ? [{ id: "saved-plan", name: "接口计划", robot_id: "robot-live", app_id: "actual-program", version: "1.0", revision: 1, schedule: { enabled: false, cron: "", timezone: "Asia/Shanghai" } }] : path?.startsWith("/audit-logs") ? { items: [{ id: "audit-1", actor_name: "测试管理员", actor_open_id: "admin", action: "run.stop", target_type: "run", target_id: "real-run", created: 1, details: {} }], total: 1, page: 1, page_size: 20, pages: 1 } : path?.includes("/runs/history") ? { items: [run], total: 1, page: 1, page_size: 10, pages: 1 } : [run],
+    error: "", refresh: () => {},
+  };
+} }));
 const page = (path: string, admin = true) => renderToStaticMarkup(<AntApp><MemoryRouter initialEntries={[path]}><ConsoleRoutes user={{ name: "测试用户", admin }} /></MemoryRouter></AntApp>);
 describe("统一控制台路由", () => {
   it("任务与运行记录均显示接口返回的数据", () => {
@@ -38,5 +41,11 @@ describe("统一控制台路由", () => {
     const html = page("/business/runs", false);
     expect(html).toContain("/business/runs/real-run");
     expect(html).not.toContain("新建任务");
+  });
+  it("管理员可以查看真实审计记录", () => {
+    expect(consoleNavigation(true).map(n => n.path)).toContain("/audit");
+    const html = page("/audit");
+    expect(html).toContain("测试管理员");
+    expect(html).toContain("停止运行");
   });
 });

@@ -3,26 +3,32 @@ import { Alert, Button, Empty, Input, Select, Space, Table, Tag } from "antd";
 import { AppstoreOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Link, useSearchParams } from "react-router-dom";
 import { PageTitle, Panel, StatusTag } from "../components/shared";
-import { date, statuses, terminal, type RobotRecord, type RunRecord } from "./api";
+import { date, statuses, terminal, type PageResult, type RobotRecord, type RunRecord } from "./api";
 import { useResource } from "./useResource";
 import { deployedApplications, inputSchemaFor, releaseKey } from "./deployments";
 
 export function RunList({ business = false, tasks = false }: { business?: boolean; tasks?: boolean }) {
   const prefix = business ? "/business" : "";
-  const { data, error, refresh } = useResource<RunRecord[]>(`${prefix}/runs`);
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [app, setApp] = useState<string>();
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const status = params.get("status") || undefined;
-  const apps = [...new Set(data?.flatMap(r => r.snapshot ? [r.snapshot.app_id] : []) || [])];
-  const filtered = data?.filter(r => r.name.includes(search) && (!status || r.status === status) && (!app || r.snapshot?.app_id === app));
-  return <div className="task-plans"><PageTitle title={tasks ? "任务管理" : business ? "业务运行" : "运行记录"} description="查看已提交任务的实际执行状态；列表显示最近 500 次运行。"
+  const robots = useResource<RobotRecord[]>(business ? null : "/robots", 10000);
+  const apps = [...new Set(robots.data?.flatMap(robot => robot.deployments?.map(item => item.app_id) || []) || [])];
+  const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (search.trim()) query.set("q", search.trim());
+  if (status) query.set("status", status);
+  if (app) query.set("app_id", app);
+  const { data, error, refresh } = useResource<PageResult<RunRecord>>(`${prefix}/runs/history?${query}`);
+  return <div className="task-plans"><PageTitle title={tasks ? "任务管理" : business ? "业务运行" : "运行记录"} description="查看全部运行记录，可按条件查询并逐页浏览。"
     actions={<Space><Button icon={<ReloadOutlined />} aria-label="刷新运行记录" onClick={refresh} />{!business && <Link to="/runs/new"><Button type="primary" icon={<PlusOutlined />}>临时运行</Button></Link>}</Space>} />
     {error && <Alert type="error" showIcon message={error} className="mb" />}
-    <Panel><div className="filter-bar"><Input aria-label="任务名称" placeholder="搜索任务名称" value={search} onChange={e => setSearch(e.target.value)} allowClear />
-      <Select aria-label="运行状态" placeholder="全部状态" allowClear value={status} onChange={value => setParams(value ? { status: value } : {})} options={Object.entries(statuses).map(([value, label]) => ({ value, label }))} />
-      {!business && <Select aria-label="应用" placeholder="全部应用" value={app} allowClear onChange={setApp} options={apps.map(value => ({ value, label: value }))} />}
-    </div><Table rowKey="id" loading={!data && !error} dataSource={filtered} scroll={{ x: business ? 700 : 1050 }} pagination={{ defaultPageSize: 10, showSizeChanger: true, showTotal: n => `共 ${n} 条` }} columns={[
+    <Panel><div className="filter-bar"><Input aria-label="任务名称" placeholder="搜索任务名称" value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} allowClear />
+      <Select aria-label="运行状态" placeholder="全部状态" allowClear value={status} onChange={value => { setParams(value ? { status: value } : {}); setPage(1); }} options={Object.entries(statuses).map(([value, label]) => ({ value, label }))} />
+      {!business && <Select aria-label="应用" placeholder="全部应用" value={app} allowClear onChange={value => { setApp(value); setPage(1); }} options={apps.map(value => ({ value, label: value }))} />}
+    </div><Table rowKey="id" loading={!data && !error} dataSource={data?.items} scroll={{ x: business ? 700 : 1050 }} pagination={{ current: page, pageSize, total: data?.total || 0, showSizeChanger: true, showTotal: n => `共 ${n} 条`, onChange: (next, size) => { setPage(next); setPageSize(size); } }} columns={[
       { title: "任务名称", render: (_, r) => <Link to={`${prefix}/runs/${r.id}`}><strong>{r.name}</strong><div className="muted small mono">{r.id}</div></Link> },
       ...(!business ? [{ title: "执行应用", render: (_: unknown, r: RunRecord) => <>{r.snapshot?.app_id || "—"}<div className="muted small">{r.snapshot?.version}</div></> }, { title: "执行机器人", dataIndex: "robot_id" }] : []),
       { title: "运行状态", dataIndex: "status", render: status => <StatusTag status={statuses[status] || status} /> },

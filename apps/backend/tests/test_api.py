@@ -11,7 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 import pytest
 
 from rpa_console.api import Config, create_app
-from rpa_console.storage import Base, Database, Evidence, LoginSession, Run, RunCredential, Operation, Event
+from rpa_console.storage import AuditLog, Base, Database, Evidence, LoginSession, Run, RunCredential, Operation, Event
 from sqlalchemy import select
 
 CREDENTIALS = {"username": "test-business-login", "password": "test-private-password-938!"}
@@ -409,3 +409,63 @@ def test_maintenance_rejects_new_run_with_visible_service_error(app):
         'snapshot': {'app_id': 'app', 'version': '1', 'inputs': {}}, 'credentials': CREDENTIALS})
     assert response.status_code == 503
     assert '维护中' in response.json()['detail']
+
+
+def test_run_history_is_filtered_and_paginated_by_the_server(app):
+    with app.state.database.transaction() as session:
+        robot = app.state.control.add_robot("history-robot")
+        for index in range(23):
+            session.add(Run(id=f"run-{index:02d}", robot_id=robot["id"], created=float(index), data={
+                "name": f"月报 {index:02d}", "status": "failed" if index % 2 else "succeeded", "seq": 0,
+                "recovery_used": 0,
+                "snapshot": {"app_id": "sales" if index < 20 else "stock", "version": "1", "inputs": {}},
+            }))
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    second = client.get("/api/runs/history?page=2&page_size=10").json()
+    assert {key: second[key] for key in ("total", "page", "page_size", "pages")} == {
+        "total": 23, "page": 2, "page_size": 10, "pages": 3}
+    assert [item["id"] for item in second["items"]] == [f"run-{index:02d}" for index in range(12, 2, -1)]
+    filtered = client.get("/api/runs/history?page=1&page_size=5&q=月报%202&status=succeeded&app_id=stock").json()
+    assert filtered["total"] == 2
+    assert [item["id"] for item in filtered["items"]] == ["run-22", "run-20"]
+    assert client.get("/api/runs/history?page=0").status_code == 422
+
+    client.cookies.set("rpa_session", "member-session")
+    business = client.get("/api/business/runs/history?page=3&page_size=10").json()
+    assert business["total"] == 23 and len(business["items"]) == 3
+    assert "snapshot" not in business["items"][0]
+
+
+def test_audit_log_records_admin_actions_without_secrets_and_supports_pagination(app):
+    client = TestClient(app, base_url="https://console.test")
+    client.cookies.set("rpa_session", "admin-session")
+    headers = {"Origin": "https://console.test"}
+    robot = None
+    for index in range(12):
+        response = client.post("/api/robots", json={"name": f"审计机器人 {index:02d}"}, headers=headers)
+        assert response.status_code == 200
+        robot = response.json()
+    app.state.control.reconcile(robot["id"], {"deployments": [{"app_id": "audit-app", "version": "1"}]})
+    run = client.post("/api/runs", headers=headers, json={
+        "name": "敏感信息检查", "robot_id": robot["id"],
+        "snapshot": {"app_id": "audit-app", "version": "1", "inputs": {"date": "2026-09-10"}},
+        "credentials": CREDENTIALS,
+    })
+    assert run.status_code == 200
+    page = client.get("/api/audit-logs?page=2&page_size=5&action=robot.create").json()
+    assert page["total"] == 12 and page["pages"] == 3 and len(page["items"]) == 5
+    assert all(item["actor_open_id"] == "admin" and item["actor_name"] == "test" for item in page["items"])
+    assert all(item["action"] == "robot.create" for item in page["items"])
+    found = client.get("/api/audit-logs?q=审计机器人%2007").json()
+    assert found["total"] == 0  # Search is deliberately limited to actor and immutable target id.
+
+    with app.state.database.transaction() as session:
+        rows = list(session.scalars(select(AuditLog)))
+        assert len(rows) == 13
+        serialized = json.dumps([row.details for row in rows], ensure_ascii=False)
+        assert all(secret not in serialized for secret in CREDENTIALS.values())
+        assert "credential" not in serialized.lower() and "token" not in serialized.lower()
+
+    client.cookies.set("rpa_session", "member-session")
+    assert client.get("/api/audit-logs").status_code == 403
