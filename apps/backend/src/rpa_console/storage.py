@@ -40,7 +40,7 @@ class Run(Base):
     __tablename__ = "runs"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     robot_id: Mapped[str] = mapped_column(ForeignKey("robots.id"), index=True)
-    created: Mapped[float] = mapped_column(Float, default=time)
+    created: Mapped[float] = mapped_column(Float, default=time, index=True)
     data: Mapped[dict] = mapped_column(JSON)
 
 
@@ -76,6 +76,18 @@ class Evidence(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     mime: Mapped[str] = mapped_column(String)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    actor_open_id: Mapped[str] = mapped_column(String, index=True)
+    actor_name: Mapped[str] = mapped_column(String)
+    action: Mapped[str] = mapped_column(String, index=True)
+    target_type: Mapped[str] = mapped_column(String)
+    target_id: Mapped[str] = mapped_column(String, index=True)
+    created: Mapped[float] = mapped_column(Float, default=time, index=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Task(Base):

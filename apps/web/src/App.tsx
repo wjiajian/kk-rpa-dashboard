@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Alert, Avatar, Button, Space, Spin, Tag } from "antd";
-import { ApartmentOutlined, AppstoreOutlined, DashboardOutlined, HistoryOutlined, RobotOutlined, UnorderedListOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, AppstoreOutlined, AuditOutlined, DashboardOutlined, HistoryOutlined, RobotOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { PageTitle, NotFound } from "./components/shared";
 import { useResource } from "./live/useResource";
@@ -9,6 +9,7 @@ import { ApplicationList, RunList, WorkspaceOverview } from "./live/WorkspacePag
 import { TaskPlans, EditPlan } from "./live/TaskPlans";
 import Publishing from "./live/Publishing";
 import NewTask from "./live/NewTask";
+import AuditLog from "./live/AuditLog";
 
 export interface ConsoleUser { name: string; admin: boolean }
 export const consoleNavigation = (admin: boolean) => admin ? [
@@ -17,6 +18,7 @@ export const consoleNavigation = (admin: boolean) => admin ? [
   { path: "/tasks", label: "任务管理", icon: <UnorderedListOutlined /> },
   { path: "/runs", label: "运行记录", icon: <HistoryOutlined /> },
   { path: "/robots", label: "机器人", icon: <RobotOutlined /> },
+  { path: "/audit", label: "操作审计", icon: <AuditOutlined /> },
 ] : [{ path: "/business/runs", label: "业务运行", icon: <HistoryOutlined /> }];
 
 export default function App() {
@@ -45,6 +47,7 @@ export function ConsoleRoutes({ user }: { user: ConsoleUser }) {
     <Route path="/runs/new" element={<NewTask />} />
     <Route path="/runs/:id" element={<LiveDetail business={false} />} />
     <Route path="/robots" element={<LiveRobots />} />
+    <Route path="/audit" element={<AuditLog />} />
     <Route path="/business/runs" element={<RunList business />} />
     <Route path="/business/runs/:id" element={<LiveDetail business />} />
     <Route path="*" element={<NotFound />} />

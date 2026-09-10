@@ -14,11 +14,11 @@ from typing import Literal
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .control import Conflict, Control, TERMINAL, remaining
@@ -26,7 +26,7 @@ from .credentials import CredentialError, CredentialStore
 from .tasks import Tasks, cron_times
 from .publishing import Publishing
 from .storage import ApplicationSource, ImportJob, PublishedApplication, ApplicationRelease, RobotDeployment, DeploymentJob
-from .storage import Task, RunTrigger, Database, Event, Evidence, LoginSession, Operation, Robot, Run, RunCredential, uid
+from .storage import AuditLog, Task, RunTrigger, Database, Event, Evidence, LoginSession, Operation, Robot, Run, RunCredential, uid
 
 
 @dataclass
@@ -273,6 +273,17 @@ def create_app(config=None, database=None):
         if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + cfg.internal_token):
             raise HTTPException(401, "内部服务认证失败")
 
+    def record_audit(user, action, target_type, target_id, details=None):
+        """Persist only explicit, non-secret facts about accepted administrator actions."""
+        with db.transaction() as s:
+            s.add(AuditLog(id=uid(), actor_open_id=user["open_id"], actor_name=user["name"],
+                           action=action, target_type=target_type, target_id=str(target_id),
+                           details=details or {}))
+
+    def page_result(items, total, page, page_size):
+        return {"items": items, "total": total, "page": page, "page_size": page_size,
+                "pages": (total + page_size - 1) // page_size}
+
     @app.get("/api/health")
     def health():
         return {"status": "ok", "mode": "live"}
@@ -328,21 +339,26 @@ def create_app(config=None, database=None):
             return [{"id": r.id, "name": r.name, "active_run": r.active_run, "online": r.id in connected,
                      "revoked": r.credential_hash is None, "deployments": r.deployments, "capabilities": r.capabilities, "deployment_job": r.deployment_job} for r in s.scalars(select(Robot))]
 
-    @app.post("/api/robots", dependencies=[Depends(admin)])
-    def add_robot(body: NewRobot):
-        return control.add_robot(body.name)
+    @app.post("/api/robots")
+    def add_robot(body: NewRobot, user=Depends(admin)):
+        result = control.add_robot(body.name)
+        record_audit(user, "robot.create", "robot", result["id"], {"name": body.name})
+        return result
 
-    @app.post("/api/robots/{robot_id}/revoke", dependencies=[Depends(admin)])
-    def revoke(robot_id: str):
+    @app.post("/api/robots/{robot_id}/revoke")
+    def revoke(robot_id: str, user=Depends(admin)):
         control.revoke(robot_id)
+        record_audit(user, "robot.revoke", "robot", robot_id)
         return {"stop_requested": True}
 
-    @app.post("/api/robots/{robot_id}/rotate", dependencies=[Depends(admin)])
-    def rotate(robot_id: str):
-        return {"credential": control.revoke(robot_id, rotate=True)}
+    @app.post("/api/robots/{robot_id}/rotate")
+    def rotate(robot_id: str, user=Depends(admin)):
+        credential = control.revoke(robot_id, rotate=True)
+        record_audit(user, "robot.rotate", "robot", robot_id)
+        return {"credential": credential}
 
-    @app.post("/api/runs", dependencies=[Depends(admin)])
-    def create_run(body: NewRun):
+    @app.post("/api/runs")
+    def create_run(body: NewRun, user=Depends(admin)):
         def reject_secrets(value):
             if isinstance(value, dict):
                 for key, item in value.items():
@@ -353,9 +369,12 @@ def create_app(config=None, database=None):
                 for item in value:
                     reject_secrets(item)
         reject_secrets(body.snapshot.inputs)
-        return {"id": control.create_run(body.robot_id, body.snapshot.model_dump(), body.name,
-                                         credentials=body.credentials.plaintext(),
-                                         request_id="manual:" + body.request_id if body.request_id else None)}
+        run_id = control.create_run(body.robot_id, body.snapshot.model_dump(), body.name,
+                                    credentials=body.credentials.plaintext(),
+                                    request_id="manual:" + body.request_id if body.request_id else None)
+        record_audit(user, "run.create", "run", run_id, {"name": body.name,
+                     "robot_id": body.robot_id, "app_id": body.snapshot.app_id, "version": body.snapshot.version})
+        return {"id": run_id}
 
     @app.get("/api/tasks", dependencies=[Depends(admin)])
     def list_tasks():
@@ -367,24 +386,35 @@ def create_app(config=None, database=None):
         with db.transaction() as s:
             return tasks.view(tasks.get(s, task_id))
 
-    @app.post("/api/tasks", dependencies=[Depends(admin)])
-    def create_task(body: TaskConfig):
-        return tasks.save(body.model_dump(exclude={"credentials", "revision"}),
-                          body.credentials.plaintext() if body.credentials else None)
+    @app.post("/api/tasks")
+    def create_task(body: TaskConfig, user=Depends(admin)):
+        result = tasks.save(body.model_dump(exclude={"credentials", "revision"}),
+                            body.credentials.plaintext() if body.credentials else None)
+        record_audit(user, "task.create", "task", result["id"],
+                     {"name": body.name, "app_id": body.app_id, "version": body.version})
+        return result
 
-    @app.patch("/api/tasks/{task_id}", dependencies=[Depends(admin)])
-    def edit_task(task_id: str, body: TaskConfig):
-        return tasks.save(body.model_dump(exclude={"credentials", "revision"}),
-                          body.credentials.plaintext() if body.credentials else None,
-                          task_id, body.revision)
+    @app.patch("/api/tasks/{task_id}")
+    def edit_task(task_id: str, body: TaskConfig, user=Depends(admin)):
+        result = tasks.save(body.model_dump(exclude={"credentials", "revision"}),
+                            body.credentials.plaintext() if body.credentials else None,
+                            task_id, body.revision)
+        record_audit(user, "task.update", "task", task_id,
+                     {"name": body.name, "app_id": body.app_id, "version": body.version,
+                      "release_id": body.release_id})
+        return result
 
-    @app.put("/api/tasks/{task_id}/schedule", dependencies=[Depends(admin)])
-    def update_schedule(task_id: str, body: ScheduleChange):
-        return tasks.schedule(task_id, body.revision, body.model_dump(exclude={"revision"}))
+    @app.put("/api/tasks/{task_id}/schedule")
+    def update_schedule(task_id: str, body: ScheduleChange, user=Depends(admin)):
+        result = tasks.schedule(task_id, body.revision, body.model_dump(exclude={"revision"}))
+        record_audit(user, "task.schedule", "task", task_id, {"enabled": body.enabled})
+        return result
 
-    @app.post("/api/tasks/{task_id}/runs", dependencies=[Depends(admin)])
-    def trigger_task(task_id: str, body: Trigger):
-        return {"id": tasks.trigger(task_id, body.request_id)}
+    @app.post("/api/tasks/{task_id}/runs")
+    def trigger_task(task_id: str, body: Trigger, user=Depends(admin)):
+        run_id = tasks.trigger(task_id, body.request_id)
+        record_audit(user, "task.trigger", "task", task_id, {"run_id": run_id})
+        return {"id": run_id}
 
     @app.post("/api/schedules/preview", dependencies=[Depends(admin)])
     def preview_schedule(body: CronPreview):
@@ -395,18 +425,23 @@ def create_app(config=None, database=None):
         with db.transaction() as s:
             return [publishing.source_view(row) for row in s.scalars(select(ApplicationSource))]
 
-    @app.post("/api/application-sources", dependencies=[Depends(admin)])
-    def create_source(body: NewSource):
-        return publishing.add_source(body.name, body.url, body.credentials.plaintext() if body.credentials else None)
+    @app.post("/api/application-sources")
+    def create_source(body: NewSource, user=Depends(admin)):
+        result = publishing.add_source(body.name, body.url, body.credentials.plaintext() if body.credentials else None)
+        record_audit(user, "source.create", "application_source", result["id"], {"name": body.name})
+        return result
 
     @app.get("/api/application-imports", dependencies=[Depends(admin)])
     def imports():
         with db.transaction() as s:
             return [publishing.import_view(row) for row in s.scalars(select(ImportJob).order_by(ImportJob.created.desc()).limit(100))]
 
-    @app.post("/api/application-imports", dependencies=[Depends(admin)])
-    def create_import(body: NewImport):
-        return publishing.import_source(body.source_id, body.ref)
+    @app.post("/api/application-imports")
+    def create_import(body: NewImport, user=Depends(admin)):
+        result = publishing.import_source(body.source_id, body.ref)
+        record_audit(user, "release.import", "application_import", result["id"],
+                     {"source_id": body.source_id, "ref": body.ref})
+        return result
 
     @app.get("/api/application-imports/{job_id}", dependencies=[Depends(admin)])
     def import_detail(job_id: str):
@@ -416,9 +451,11 @@ def create_app(config=None, database=None):
                 raise HTTPException(404, "导入作业不存在")
             return publishing.import_view(job)
 
-    @app.post("/api/application-imports/{job_id}/confirm", dependencies=[Depends(admin)])
-    def confirm_import(job_id: str, body: ConfirmImport):
-        return publishing.confirm(job_id, body.app_ids)
+    @app.post("/api/application-imports/{job_id}/confirm")
+    def confirm_import(job_id: str, body: ConfirmImport, user=Depends(admin)):
+        result = publishing.confirm(job_id, body.app_ids)
+        record_audit(user, "release.confirm", "application_import", job_id, {"app_ids": body.app_ids})
+        return result
 
     @app.get("/api/applications", dependencies=[Depends(admin)])
     def applications():
@@ -446,13 +483,19 @@ def create_app(config=None, database=None):
                     for row in s.scalars(select(RobotDeployment).where(RobotDeployment.robot_id == robot_id))],
                     "jobs": [publishing.job_view(row) for row in s.scalars(select(DeploymentJob).where(DeploymentJob.robot_id == robot_id).order_by(DeploymentJob.created.desc()).limit(100))]}
 
-    @app.post("/api/robots/{robot_id}/deployments", dependencies=[Depends(admin)])
-    def install_release(robot_id: str, body: NewDeployment):
-        return publishing.request_deployment(robot_id, body.release_id)
+    @app.post("/api/robots/{robot_id}/deployments")
+    def install_release(robot_id: str, body: NewDeployment, user=Depends(admin)):
+        result = publishing.request_deployment(robot_id, body.release_id)
+        record_audit(user, "release.install", "release", body.release_id,
+                     {"robot_id": robot_id, "job_id": result["id"]})
+        return result
 
-    @app.delete("/api/robots/{robot_id}/deployments/{release_id}", dependencies=[Depends(admin)])
-    def uninstall_release(robot_id: str, release_id: str):
-        return publishing.request_deployment(robot_id, release_id, "uninstall")
+    @app.delete("/api/robots/{robot_id}/deployments/{release_id}")
+    def uninstall_release(robot_id: str, release_id: str, user=Depends(admin)):
+        result = publishing.request_deployment(robot_id, release_id, "uninstall")
+        record_audit(user, "release.uninstall", "release", release_id,
+                     {"robot_id": robot_id, "job_id": result["id"]})
+        return result
 
     @app.get("/api/deployment-jobs/{job_id}", dependencies=[Depends(admin)])
     def deployment_job(job_id: str):
@@ -469,18 +512,21 @@ def create_app(config=None, database=None):
             raise HTTPException(401, "机器人认证失败")
         return FileResponse(publishing.artifact(robot_id, job_id), media_type="application/x-tar")
 
-    @app.post("/api/runs/{run_id}/rerun", dependencies=[Depends(admin)])
-    def rerun(run_id: str):
+    @app.post("/api/runs/{run_id}/rerun")
+    def rerun(run_id: str, user=Depends(admin)):
         with db.transaction() as s:
             run = s.get(Run, run_id)
             if not run or run.data["status"] not in TERMINAL:
                 raise HTTPException(409, "只能重跑已结束的运行")
-            return {"id": control.create_run(run.robot_id, run.data["snapshot"], run.data["name"], run.id,
-                                             credentials=credentials.read(s, run.id))}
+            new_run_id = control.create_run(run.robot_id, run.data["snapshot"], run.data["name"], run.id,
+                                            credentials=credentials.read(s, run.id))
+        record_audit(user, "run.rerun", "run", run_id, {"new_run_id": new_run_id})
+        return {"id": new_run_id}
 
-    @app.post("/api/runs/{run_id}/stop", dependencies=[Depends(admin)])
-    def stop(run_id: str):
+    @app.post("/api/runs/{run_id}/stop")
+    def stop(run_id: str, user=Depends(admin)):
         control.request_stop(run_id)
+        record_audit(user, "run.stop", "run", run_id)
         return {"requested": True}
 
     def view(run, business):
@@ -512,6 +558,33 @@ def create_app(config=None, database=None):
         with db.transaction() as s:
             return [view(r, True) for r in s.scalars(select(Run).order_by(Run.created.desc()).limit(500))]
 
+    def run_history_page(business, page, page_size, query, status, app_id):
+        filters = []
+        if query:
+            escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            if escaped:
+                filters.append(Run.data["name"].as_string().ilike(f"%{escaped}%", escape="\\"))
+        if status:
+            filters.append(Run.data["status"].as_string() == status)
+        if app_id and not business:
+            filters.append(Run.data["snapshot"]["app_id"].as_string() == app_id)
+        with db.transaction() as s:
+            total = s.scalar(select(func.count()).select_from(Run).where(*filters)) or 0
+            rows = s.scalars(select(Run).where(*filters).order_by(Run.created.desc(), Run.id.desc())
+                             .offset((page - 1) * page_size).limit(page_size))
+            return page_result([view(row, business) for row in rows], total, page, page_size)
+
+    @app.get("/api/runs/history", dependencies=[Depends(admin)])
+    def run_history(page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
+                    q: str = Query("", max_length=200), status: str | None = Query(None, max_length=40),
+                    app_id: str | None = Query(None, max_length=200)):
+        return run_history_page(False, page, page_size, q, status, app_id)
+
+    @app.get("/api/business/runs/history", dependencies=[Depends(identity)])
+    def business_run_history(page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
+                             q: str = Query("", max_length=200), status: str | None = Query(None, max_length=40)):
+        return run_history_page(True, page, page_size, q, status, None)
+
     @app.get("/api/runs/{run_id}", dependencies=[Depends(admin)])
     def run(run_id: str):
         return read_run(run_id, False)
@@ -519,6 +592,26 @@ def create_app(config=None, database=None):
     @app.get("/api/business/runs/{run_id}", dependencies=[Depends(identity)])
     def business_run(run_id: str):
         return read_run(run_id, True)
+
+    @app.get("/api/audit-logs", dependencies=[Depends(admin)])
+    def audit_logs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+                   q: str = Query("", max_length=200), action: str | None = Query(None, max_length=80)):
+        filters = []
+        if q.strip():
+            escaped = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            filters.append(or_(AuditLog.actor_name.ilike(pattern, escape="\\"),
+                               AuditLog.target_id.ilike(pattern, escape="\\")))
+        if action:
+            filters.append(AuditLog.action == action)
+        with db.transaction() as s:
+            total = s.scalar(select(func.count()).select_from(AuditLog).where(*filters)) or 0
+            rows = s.scalars(select(AuditLog).where(*filters).order_by(AuditLog.created.desc(), AuditLog.id.desc())
+                             .offset((page - 1) * page_size).limit(page_size))
+            items = [{"id": row.id, "actor_name": row.actor_name, "actor_open_id": row.actor_open_id,
+                      "action": row.action, "target_type": row.target_type, "target_id": row.target_id,
+                      "created": row.created, "details": row.details} for row in rows]
+            return page_result(items, total, page, page_size)
 
     @app.get("/api/business/screenshots/{evidence_id}", dependencies=[Depends(identity)])
     def screenshot(evidence_id: str):
